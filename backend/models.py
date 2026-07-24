@@ -50,6 +50,7 @@ class CouncilRequest(BaseModel):
     preset_id: str
     scratchpad: str | None = None
     model_overrides: dict[str, ModelRef] | None = None
+    contract_overrides: dict[str, str] | None = None
 
 
 class Critique(BaseModel):

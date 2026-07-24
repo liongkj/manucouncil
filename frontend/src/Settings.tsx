@@ -21,10 +21,10 @@ function valueFromModel(m: ModelRef): string {
 export default function SettingsPanel({ settings, presets, models, onSave, onClose }: Props) {
   const [local, setLocal] = useState<Settings>(() => ({
     defaultModel: { ...settings.defaultModel },
-    modelOverrides: Object.fromEntries(
-      Object.entries(settings.modelOverrides).map(([k, v]) => [k, { ...v }])
-    ),
+    modelOverrides: JSON.parse(JSON.stringify(settings.modelOverrides)),
     scratchpadVisible: settings.scratchpadVisible,
+    commissionedModels: [...settings.commissionedModels],
+    customContracts: JSON.parse(JSON.stringify(settings.customContracts)),
   }))
 
   const providers = models.reduce((acc: Record<string, ModelOption[]>, m) => {
@@ -33,6 +33,30 @@ export default function SettingsPanel({ settings, presets, models, onSave, onClo
     return acc
   }, {})
 
+  const allModels = models.map(m => m.value)
+
+  const commissionedList = local.commissionedModels || []
+  const commissionSet = new Set(commissionedList.length > 0 ? commissionedList : allModels)
+
+  const commissionedOptions = models.filter(m => commissionSet.has(m.value))
+  const commissionedProviders = commissionedOptions.reduce((acc: Record<string, ModelOption[]>, m) => {
+    if (!acc[m.provider]) acc[m.provider] = []
+    acc[m.provider].push(m)
+    return acc
+  }, {})
+
+  const toggleCommission = (value: string) => {
+    setLocal(prev => {
+      const prevCom = prev.commissionedModels || []
+      const set = new Set(prevCom.length > 0 ? prevCom : allModels)
+      if (set.has(value)) set.delete(value)
+      else set.add(value)
+      return { ...prev, commissionedModels: Array.from(set) }
+    })
+  }
+
+  const isDefaultCommissioned = (local.commissionedModels || []).length === 0
+
   const allMembers = presets.flatMap(p =>
     p.members.map(m => ({
       member_id: m.id,
@@ -40,32 +64,51 @@ export default function SettingsPanel({ settings, presets, models, onSave, onClo
       role: `${p.label} \u2192 ${m.role}`,
       provider: local.modelOverrides[p.id]?.[m.id]?.provider || m.model.provider,
       model: local.modelOverrides[p.id]?.[m.id]?.model || m.model.model,
+      contract: local.customContracts[p.id]?.[m.id] || m.contract,
     }))
   )
 
-  const updateMember = (presetId: string, memberId: string, value: string) => {
-    const ref = modelFromValue(value)
-    setLocal(prev => ({
-      ...prev,
-      modelOverrides: {
-        ...prev.modelOverrides,
-        [presetId]: {
-          ...(prev.modelOverrides[presetId] || {}),
-          [memberId]: ref,
-        },
-      },
-    }))
+  const updateMember = (presetId: string, memberId: string, field: string, value: any) => {
+    setLocal(prev => {
+      if (field === 'model') {
+        const ref = modelFromValue(value)
+        return {
+          ...prev,
+          modelOverrides: {
+            ...prev.modelOverrides,
+            [presetId]: {
+              ...(prev.modelOverrides[presetId] || {}),
+              [memberId]: ref,
+            },
+          },
+        }
+      }
+      if (field === 'contract') {
+        return {
+          ...prev,
+          customContracts: {
+            ...prev.customContracts,
+            [presetId]: {
+              ...(prev.customContracts[presetId] || {}),
+              [memberId]: value,
+            },
+          },
+        }
+      }
+      return prev
+    })
   }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200">
+      <div className="bg-white rounded-xl shadow-xl max-w-xl w-full mx-4 max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 shrink-0">
           <h2 className="text-sm font-semibold text-gray-800">Settings</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
         </div>
 
-        <div className="p-5 space-y-5">
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-6">
+          {/* Default model */}
           <div>
             <label className="text-xs font-medium text-gray-700 block mb-2">Default model (single mode)</label>
             <select
@@ -73,7 +116,7 @@ export default function SettingsPanel({ settings, presets, models, onSave, onClo
               onChange={e => setLocal(prev => ({ ...prev, defaultModel: modelFromValue(e.target.value) }))}
               className="w-full text-xs border border-gray-300 rounded-lg px-3 py-2 bg-white text-gray-700"
             >
-              {Object.entries(providers).map(([provider, providerModels]) => (
+              {Object.entries(commissionedProviders).map(([provider, providerModels]) => (
                 <optgroup key={provider} label={provider}>
                   {providerModels.map(m => (
                     <option key={m.value} value={m.value}>{m.label}</option>
@@ -83,37 +126,76 @@ export default function SettingsPanel({ settings, presets, models, onSave, onClo
             </select>
           </div>
 
+          {/* Commissioned Models */}
           <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-xs font-medium text-gray-700">Per-member models</label>
-              <span className="text-[10px] text-gray-400">Override preset defaults</span>
-            </div>
-            {allMembers.length === 0 ? (
-              <div className="text-xs text-gray-400 py-4 text-center">No presets loaded</div>
-            ) : (
-              <div className="space-y-2 max-h-64 overflow-y-auto">
+            <details open>
+              <summary className="text-xs font-medium text-gray-700 cursor-pointer hover:text-gray-900">
+                Commissioned Models
+                <span className="text-gray-400 font-normal ml-1">({isDefaultCommissioned ? 'all' : local.commissionedModels.length} selected)</span>
+              </summary>
+              <div className="mt-2 grid grid-cols-2 gap-1 max-h-48 overflow-y-auto bg-gray-50 rounded-lg p-2">
+                {models.map(m => (
+                  <label key={m.value} className="flex items-center gap-1.5 text-[11px] text-gray-600 hover:text-gray-800 cursor-pointer px-1 py-0.5 rounded hover:bg-white">
+                    <input
+                      type="checkbox"
+                      checked={commissionSet.has(m.value)}
+                      onChange={() => toggleCommission(m.value)}
+                      className="rounded border-gray-300 w-3 h-3"
+                    />
+                    <span className="truncate">{m.label}</span>
+                    <span className="text-[9px] text-gray-400 ml-auto">{m.provider}</span>
+                  </label>
+                ))}
+              </div>
+              {isDefaultCommissioned && (
+                <p className="text-[10px] text-gray-400 mt-1">All models shown. Uncheck to commission specific models.</p>
+              )}
+            </details>
+          </div>
+
+          {/* Member Editor */}
+          <div>
+            <details open>
+              <summary className="text-xs font-medium text-gray-700 cursor-pointer hover:text-gray-900">
+                Member Configuration
+                <span className="text-gray-400 font-normal ml-1">({allMembers.length} members)</span>
+              </summary>
+              <div className="mt-2 space-y-3">
                 {allMembers.map((m, i) => (
-                  <div key={`${m.member_id}-${i}`} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
-                    <span className="text-xs text-gray-600 flex-1 truncate" title={m.role}>{m.role}</span>
-                    <select
-                      value={valueFromModel({ provider: m.provider, model: m.model })}
-                      onChange={e => updateMember(m.preset_id, m.member_id, e.target.value)}
-                      className="text-[11px] border border-gray-300 rounded px-2 py-1 bg-white text-gray-700 max-w-36"
-                    >
-                      {Object.entries(providers).map(([provider, providerModels]) => (
-                        <optgroup key={provider} label={provider}>
-                          {providerModels.map(mo => (
-                            <option key={mo.value} value={mo.value}>{mo.label}</option>
-                          ))}
-                        </optgroup>
-                      ))}
-                    </select>
+                  <div key={`${m.member_id}-${i}`} className="bg-gray-50 rounded-lg p-3 space-y-2 border border-gray-100">
+                    <div className="text-[11px] font-medium text-gray-600">{m.role}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-gray-400 shrink-0">Model:</span>
+                      <select
+                        value={valueFromModel({ provider: m.provider, model: m.model })}
+                        onChange={e => updateMember(m.preset_id, m.member_id, 'model', e.target.value)}
+                        className="flex-1 text-[11px] border border-gray-300 rounded px-2 py-1 bg-white text-gray-700"
+                      >
+                        {Object.entries(commissionedProviders).map(([provider, providerModels]) => (
+                          <optgroup key={provider} label={provider}>
+                            {providerModels.map(mo => (
+                              <option key={mo.value} value={mo.value}>{mo.label}</option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-gray-400 block mb-1">Prompt / Contract:</span>
+                      <textarea
+                        value={m.contract}
+                        onChange={e => updateMember(m.preset_id, m.member_id, 'contract', e.target.value)}
+                        rows={3}
+                        className="w-full text-[10px] border border-gray-300 rounded px-2 py-1.5 bg-white text-gray-700 resize-y focus:outline-none focus:ring-1 focus:ring-council-300"
+                      />
+                    </div>
                   </div>
                 ))}
               </div>
-            )}
+            </details>
           </div>
 
+          {/* Scratchpad */}
           <div className="flex items-center gap-2">
             <input
               type="checkbox"
@@ -124,15 +206,9 @@ export default function SettingsPanel({ settings, presets, models, onSave, onClo
             />
             <label htmlFor="scratchpad-vis" className="text-xs text-gray-700">Show scratchpad by default</label>
           </div>
-
-          {models.length > 0 && (
-            <div className="text-[10px] text-gray-400">
-              {models.length} models available across {Object.keys(providers).length} providers
-            </div>
-          )}
         </div>
 
-        <div className="flex justify-end gap-2 px-5 py-3 border-t border-gray-200">
+        <div className="flex justify-end gap-2 px-5 py-3 border-t border-gray-200 shrink-0">
           <button onClick={onClose} className="px-3 py-1.5 text-xs text-gray-600 hover:text-gray-800">Cancel</button>
           <button
             onClick={() => { onSave(local); onClose() }}

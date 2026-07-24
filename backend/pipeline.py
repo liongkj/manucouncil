@@ -223,16 +223,18 @@ async def run_council(
     text: str,
     scratchpad: str | None = None,
     model_overrides: dict[str, ModelRef] | None = None,
+    contract_overrides: dict[str, str] | None = None,
 ) -> tuple[list[MemberResult], ChairResult | None, list[Critique] | None]:
     preset = get_preset(preset_id)
-    overrides = model_overrides or {}
+    model_over = model_overrides or {}
+    contract_over = contract_overrides or {}
 
     members = [
         PresetMember(
             id=m.id,
             role=m.role,
-            model=overrides.get(m.id, m.model),
-            contract=m.contract,
+            model=model_over.get(m.id, m.model),
+            contract=contract_over.get(m.id, m.contract),
             skip_in_critique=m.skip_in_critique,
         )
         for m in preset.members
@@ -405,16 +407,18 @@ async def run_council_streaming(
     text: str,
     scratchpad: str | None = None,
     model_overrides: dict[str, ModelRef] | None = None,
+    contract_overrides: dict[str, str] | None = None,
 ) -> AsyncIterator[dict]:
     preset = get_preset(preset_id)
-    overrides = model_overrides or {}
+    model_over = model_overrides or {}
+    contract_over = contract_overrides or {}
 
     members = [
         PresetMember(
             id=m.id,
             role=m.role,
-            model=overrides.get(m.id, m.model),
-            contract=m.contract,
+            model=model_over.get(m.id, m.model),
+            contract=contract_over.get(m.id, m.contract),
             skip_in_critique=m.skip_in_critique,
         )
         for m in preset.members

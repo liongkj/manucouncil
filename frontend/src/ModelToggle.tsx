@@ -36,7 +36,12 @@ export default function ModelToggle({
     ? selPreset.members.filter(m => settings.modelOverrides[selPreset.id]?.[m.id]).length
     : 0
 
-  const providers = models.reduce((acc: Record<string, ModelOption[]>, m) => {
+  const commissioned = settings.commissionedModels || []
+  const commissionedSet = new Set(
+    commissioned.length > 0 ? commissioned : models.map(m => m.value)
+  )
+  const filteredModels = models.filter(m => commissionedSet.has(m.value))
+  const providers = filteredModels.reduce((acc: Record<string, ModelOption[]>, m) => {
     if (!acc[m.provider]) acc[m.provider] = []
     acc[m.provider].push(m)
     return acc

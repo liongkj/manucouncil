@@ -85,10 +85,14 @@ export interface Settings {
   defaultModel: ModelRef
   modelOverrides: Record<string, Record<string, ModelRef>>
   scratchpadVisible: boolean
+  commissionedModels: string[]
+  customContracts: Record<string, Record<string, string>>
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   defaultModel: { provider: 'deepseek', model: 'deepseek-v4-flash' },
   modelOverrides: {},
   scratchpadVisible: false,
+  commissionedModels: [],
+  customContracts: {},
 }

@@ -291,6 +291,7 @@ async def council_stream(req: CouncilRequest):
                 text=req.text,
                 scratchpad=req.scratchpad,
                 model_overrides=req.model_overrides,
+                contract_overrides=req.contract_overrides,
             ):
                 yield {"event": ev["event"], "data": json.dumps(ev["data"])}
         except Exception as e:
@@ -317,6 +318,7 @@ async def council(req: CouncilRequest):
             text=req.text,
             scratchpad=req.scratchpad,
             model_overrides=req.model_overrides,
+            contract_overrides=req.contract_overrides,
         )
     except Exception as e:
         raise HTTPException(500, f"Council pipeline failed: {e}")

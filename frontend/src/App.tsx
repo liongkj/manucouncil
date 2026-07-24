@@ -9,7 +9,10 @@ const SETTINGS_KEY = 'research-council-settings'
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
-    if (raw) return JSON.parse(raw)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      return { ...DEFAULT_SETTINGS, ...parsed }
+    }
   } catch { /* ignore */ }
   return DEFAULT_SETTINGS
 }
@@ -152,10 +155,14 @@ export default function App() {
   const handleCouncil = useCallback(async (text: string, presetId: string, scratchpad: string) => {
     const preset = presets.find(p => p.id === presetId)
     const overrides = settings.modelOverrides[presetId]
-    const body: Record<string, unknown> = { text, preset_id: presetId, scratchpad }
-    if (overrides && Object.keys(overrides).length > 0) {
-      body.model_overrides = overrides
-    }
+        const contractOverrides = settings.customContracts[presetId]
+        const body: Record<string, unknown> = { text, preset_id: presetId, scratchpad }
+        if (overrides && Object.keys(overrides).length > 0) {
+          body.model_overrides = overrides
+        }
+        if (contractOverrides && Object.keys(contractOverrides).length > 0) {
+          body.contract_overrides = contractOverrides
+        }
 
     setCouncilProgress({ preset_id: presetId, text, chair: null, members: [], critiques: [] })
 
