@@ -1,0 +1,18 @@
+[project]
+name = "research-council"
+version = "0.1.0"
+description = "Multi-model editorial board for scientific writing"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "httpx>=0.28.0",
+    "sse-starlette>=2.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]
+
+[dependency-groups]
+dev = []
