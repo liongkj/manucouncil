@@ -70,6 +70,7 @@ class MemberResult(BaseModel):
     recommendation: str | None
     risks: list[str]
     confidence: float
+    round: int | None = None
 
 
 class ChairResult(BaseModel):

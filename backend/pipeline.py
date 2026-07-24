@@ -822,3 +822,228 @@ async def run_council_debate_nonstream(
             chair_out = ChairResult(**ev["data"])
 
     return members_list, chair_out, critiques_out if critiques_out else None
+async def _stream_member_revision(
+    bridge: OpenCodeBridge,
+    member: PresetMember,
+    text: str,
+    own_review: str,
+    all_member_results: list[MemberResult],
+    critiques: list[Critique],
+    scratchpad: str | None = None,
+    log_session_id: str | None = None,
+) -> AsyncIterator[tuple[str, str, list[str], float]]:
+    system = f"Role: {member.role}\n\n{member.contract}\n\nYou are participating in a multi-round debate. Revise your analysis based on peer feedback."
+    prompt = _build_revision_prompt(member, text, own_review, all_member_results, critiques, scratchpad)
+
+    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    session = await bridge.create_session()
+    try:
+        async def listen():
+            try:
+                async for ev in bridge.stream_events():
+                    props = ev.get("properties", {})
+                    if props.get("sessionID") == session.id:
+                        await queue.put(ev)
+            except Exception:
+                pass
+            finally:
+                await queue.put(None)
+
+        listener = asyncio.create_task(listen())
+        await asyncio.sleep(0.05)
+
+        await bridge.send_message_async(
+            session_id=session.id,
+            model=member.model,
+            system=system,
+            parts=[{"type": "text", "text": prompt}],
+            tools={},
+            log_session_id=log_session_id,
+        )
+
+        full = ""
+        risks: list[str] = []
+        confidence = 0.5
+        while True:
+            ev = await queue.get()
+            if ev is None:
+                break
+            ev_type = ev.get("type", "")
+            props = ev.get("properties", {})
+            if ev_type == "message.part.delta":
+                delta = props.get("delta", "")
+                if delta:
+                    full += delta
+                    yield ("chunk", _clean_response(full), risks, confidence)
+            elif ev_type == "message.part.updated":
+                part = props.get("part", {})
+                if part.get("type") == "text" and part.get("text"):
+                    pass
+            elif ev_type == "session.idle":
+                break
+
+        listener.cancel()
+        try:
+            await listener
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        final = _clean_response(full)
+        yield ("done", final, risks, confidence)
+
+    finally:
+        await session.delete()
+
+
+async def run_council_debate_streaming(
+    bridge: OpenCodeBridge,
+    preset_id: str,
+    text: str,
+    scratchpad: str | None = None,
+    model_overrides: dict[str, ModelRef] | None = None,
+    contract_overrides: dict[str, str] | None = None,
+    log_session_id: str | None = None,
+) -> AsyncIterator[dict]:
+    preset = get_preset(preset_id)
+    model_over = model_overrides or {}
+    contract_over = contract_overrides or {}
+
+    members = [
+        PresetMember(
+            id=m.id,
+            role=m.role,
+            model=model_over.get(m.id, m.model),
+            contract=contract_over.get(m.id, m.contract),
+            skip_in_critique=m.skip_in_critique,
+        )
+        for m in preset.members
+    ]
+
+    if preset.skip_chair or preset.skip_critique:
+        yield {"event": "error", "data": "Debate mode requires critiques and chair"}
+        return
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "round_1_reviews", "round": 1, "total": 4}}
+
+    # Round 1: Independent reviews (streaming)
+    member_results: list[MemberResult] = []
+    if preset.sequential:
+        previous: list[tuple[str, str, str]] = []
+        for m in members:
+            try:
+                full_text = ""
+                async for evt in _stream_member(bridge, m, text, scratchpad, previous, log_session_id):
+                    if evt[0] == "chunk":
+                        full_text = evt[1]
+                        yield {"event": "member_text", "data": {"member_id": m.id, "text": full_text, "round": 1}}
+                result = MemberResult(
+                    member_id=m.id, role=m.role, model=m.model,
+                    analysis=full_text, recommendation=None, risks=[], confidence=0.5, round=1,
+                )
+                member_results.append(result)
+                previous.append((m.id, m.role, full_text))
+                yield {"event": "member_done", "data": {
+                    "member_id": m.id, "role": m.role, "analysis": full_text,
+                    "risks": [], "confidence": 0.5, "model": m.model.model_dump(), "round": 1,
+                }}
+            except Exception as e:
+                yield {"event": "member_error", "data": {"member_id": m.id, "role": m.role, "error": str(e), "round": 1}}
+    else:
+        queue: asyncio.Queue = asyncio.Queue()
+        member_texts: dict[str, str] = {}
+        member_complete: dict[str, bool] = {}
+
+        async def run_one(member: PresetMember):
+            try:
+                async for evt in _stream_member(bridge, member, text, scratchpad, log_session_id=log_session_id):
+                    if evt[0] == "chunk":
+                        await queue.put(("text", member.id, evt[1]))
+                    elif evt[0] == "done":
+                        await queue.put(("done", member.id, evt[1]))
+            except Exception as e:
+                await queue.put(("error", member.id, str(e)))
+
+        tasks = [asyncio.create_task(run_one(m)) for m in members]
+
+        while len(member_complete) < len(members):
+            evt_type, mid, val = await queue.get()
+            if evt_type == "text":
+                member_texts[mid] = val
+                yield {"event": "member_text", "data": {"member_id": mid, "text": val, "round": 1}}
+            elif evt_type == "done":
+                member_complete[mid] = True
+                member_texts[mid] = val
+                m = next(m for m in members if m.id == mid)
+                result = MemberResult(
+                    member_id=mid, role=m.role, model=m.model,
+                    analysis=val, recommendation=None, risks=[], confidence=0.5, round=1,
+                )
+                member_results.append(result)
+                yield {"event": "member_done", "data": {
+                    "member_id": mid, "role": m.role, "analysis": val,
+                    "risks": [], "confidence": 0.5, "model": m.model.model_dump(), "round": 1,
+                }}
+            elif evt_type == "error":
+                member_complete[mid] = True
+                yield {"event": "member_error", "data": {"member_id": mid, "error": val, "round": 1}}
+
+        for t in tasks:
+            t.cancel()
+
+    if len(member_results) < 2:
+        yield {"event": "error", "data": "Quorum not met"}
+        return
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "round_2_critique", "round": 2, "total": 4}}
+
+    # Round 2: Critique
+    critiques: list[Critique] = []
+    c2_tasks = []
+    for m in members:
+        if m.skip_in_critique:
+            continue
+        pool = _build_peer_pool(member_results, exclude_id=m.id)
+        if len(pool) < 1:
+            continue
+        c2_tasks.append(_run_critique(bridge, m, text, pool, scratchpad, log_session_id))
+    for coro in asyncio.as_completed(c2_tasks):
+        try:
+            c = await coro
+            critiques.append(c)
+            yield {"event": "critique_done", "data": {"reviewer_id": c.reviewer_id, "disagreements": c.disagreements, "round": 2}}
+        except Exception:
+            pass
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "round_3_revision", "round": 3, "total": 4}}
+
+    # Round 3: Revision (streaming)
+    revised: list[MemberResult] = []
+    own_reviews = {r.member_id: r.analysis for r in member_results}
+    revision_tasks = [
+        _stream_member_revision(bridge, m, text, own_reviews[m.id], member_results, critiques, scratchpad, log_session_id)
+        for m in members if m.id in own_reviews
+    ]
+    for coro in asyncio.as_completed(revision_tasks):
+        try:
+            full_text = ""
+            async for evt in coro:
+                if evt[0] == "chunk":
+                    full_text = evt[1]
+                    yield {"event": "member_revision_text", "data": {"member_id": m.id, "text": full_text, "round": 3}}
+                elif evt[0] == "done":
+                    full_text = evt[1]
+            m = next(m for m in members if m.id == mid)
+            result = MemberResult(
+                member_id=m.id, role=m.role, model=m.model,
+                analysis=full_text, recommendation=None, risks=[], confidence=0.5, round=3,
+            )
+            revised.append(result)
+            yield {"event": "member_revision", "data": {
+                "member_id": m.id, "role": m.role, "analysis": full_text,
+                "model": m.model.model_dump(), "round": 3,
+            }}
+        except Exception as e:
+            yield {"event": "member_error", "data": {"member_id": m.id, "role": m.role, "error": str(e), "round": 3}}
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "round_4_final_critique", "round": 4, "total": 4}}

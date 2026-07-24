@@ -1,13 +1,15 @@
-import type { CouncilResponse } from './types'
+import type { CouncilResponse, StageEvent } from './types'
 import CouncilDiscussion from './CouncilDiscussion'
 import DiffView from './DiffView'
 
 interface Props {
   result: CouncilResponse
   inProgress?: boolean
+  currentStage?: StageEvent | null
+  councilMode?: 'council' | 'debate'
 }
 
-export default function CouncilResult({ result, inProgress }: Props) {
+export default function CouncilResult({ result, inProgress, currentStage, councilMode }: Props) {
   const chair = result.chair
 
   return (
@@ -17,6 +19,8 @@ export default function CouncilResult({ result, inProgress }: Props) {
         critiques={result.critiques}
         chair={chair}
         inProgress={inProgress}
+        mode={councilMode}
+        currentRound={currentStage?.round}
       />
 
       {chair?.recommended_text && chair.recommended_text !== result.text && !inProgress && (
