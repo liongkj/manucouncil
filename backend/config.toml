@@ -1,0 +1,8 @@
+[council]
+mode = "council"
+
+# [council.model_overrides]
+# "member_id" = { provider = "deepseek", model = "deepseek-v4-flash" }
+
+# [council.contract_overrides]
+# "member_id" = "Write a compelling..."

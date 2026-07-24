@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 
 from backend import debug_log
 from backend.bridge import OpenCodeBridge
+from backend.config import env
 from backend.models import (
     ChairResult,
     Critique,
@@ -36,7 +37,9 @@ def _build_system_prompt(role: str, contract: str) -> str:
 Respond with natural prose. Do NOT use JSON or markdown code fences. Write in clear paragraph form. Include your analysis, key findings, risks, and recommendation in plain text."""
 
 
-CHAIN_OF_THOUGHT_KICKER = "\n\nFirst, re-read the user's text carefully. Then work through your analysis step by step before writing your final response."
+CHAIN_OF_THOUGHT_KICKER = env.pipeline.chain_of_thought_kicker
+DEFAULT_CONFIDENCE = env.pipeline.default_confidence
+DEFAULT_QUORUM = env.pipeline.quorum_min_members
 
 
 def _build_user_text(text: str, scratchpad: str | None = None, previous_results: list[tuple[str, str, str]] | None = None) -> str:
@@ -85,7 +88,7 @@ async def _call_member(
         analysis=_clean_response(response),
         recommendation=None,
         risks=[],
-        confidence=0.5,
+        confidence=DEFAULT_CONFIDENCE,
     )
 
 
@@ -200,7 +203,7 @@ async def _run_critique(
         response = await bridge.send_message(
             session_id=session.id,
             model=member.model,
-            system="You are a peer reviewer evaluating other reviewers. Be critical and specific. Output ONLY valid JSON.",
+            system=env.pipeline.prompts.critique_system,
             parts=[{"type": "text", "text": prompt}],
             tools={},
             log_session_id=log_session_id,
@@ -213,7 +216,7 @@ async def _run_critique(
             response = await bridge.send_message(
                 session_id=session.id,
                 model=member.model,
-                system="You are a peer reviewer. Output ONLY valid JSON. No markdown, no code fences.",
+                system=env.pipeline.prompts.critique_retry_system,
                 parts=[{"type": "text", "text": retry_prompt}],
                 tools={},
                 log_session_id=log_session_id,
@@ -364,16 +367,16 @@ async def run_council(
             except Exception as e:
                 stage_errors.append(("member", str(e)))
 
-    if len(member_results) < 2:
+    if len(member_results) < DEFAULT_QUORUM:
         raise PipelineError(
-            f"Quorum not met: {len(member_results)}/2 members succeeded. "
+            f"Quorum not met: {len(member_results)}/{DEFAULT_QUORUM} members succeeded. "
             f"Errors: {stage_errors}"
         )
 
     critiques: list[Critique] | None = None
     chair_result: ChairResult | None = None
 
-    if not preset.skip_critique and len(member_results) >= 2:
+    if not preset.skip_critique and len(member_results) >= DEFAULT_QUORUM:
         critique_tasks = []
         for m in members:
             if m.skip_in_critique:
@@ -402,7 +405,7 @@ async def run_council(
                 chair_text = await bridge.send_message(
                     session_id=session.id,
                     model=preset.chair.model,
-                    system="You are the Chair of a scientific writing council. Synthesize, do not average.",
+                    system=env.pipeline.prompts.chair_system,
                     parts=[{"type": "text", "text": chair_prompt}],
                     tools={},
                 )
@@ -463,7 +466,7 @@ async def _stream_member(
                 await queue.put(None)
 
         listener = asyncio.create_task(listen())
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(env.pipeline.stream_delay_seconds)
 
         await bridge.send_message_async(
             session_id=session.id,
@@ -476,7 +479,7 @@ async def _stream_member(
 
         full = ""
         risks: list[str] = []
-        confidence = 0.5
+        confidence = DEFAULT_CONFIDENCE
         idle_received = False
         while True:
             ev = await queue.get()
@@ -572,7 +575,7 @@ async def run_council_streaming(
                         yield {"event": "member_text", "data": {"member_id": m.id, "text": full_text}}
                 result = MemberResult(
                     member_id=m.id, role=m.role, model=m.model,
-                    analysis=full_text, recommendation=None, risks=[], confidence=0.5,
+                    analysis=full_text, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE,
                 )
                 member_results.append(result)
                 previous.append((m.id, m.role, full_text))
@@ -607,7 +610,7 @@ async def run_council_streaming(
                 m = next(m for m in members if m.id == mid)
                 result = MemberResult(
                     member_id=mid, role=m.role, model=m.model,
-                    analysis=val, recommendation=None, risks=[], confidence=0.5,
+                    analysis=val, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE,
                 )
                 member_results.append(result)
                 yield _emit_member(m.role, val, [], 0.5, mid, m.model.model_dump())
@@ -620,12 +623,12 @@ async def run_council_streaming(
 
     yield {"event": "stage", "data": {"stage": "members", "status": "complete", "total": len(member_results)}}
 
-    if len(member_results) < 2:
-        yield {"event": "error", "data": f"Quorum not met: {len(member_results)}/2 members"}
+    if len(member_results) < DEFAULT_QUORUM:
+        yield {"event": "error", "data": f"Quorum not met: {len(member_results)}/{DEFAULT_QUORUM} members"}
         return
 
     critiques: list[Critique] = []
-    if not preset.skip_critique and len(member_results) >= 2:
+    if not preset.skip_critique and len(member_results) >= DEFAULT_QUORUM:
         yield {"event": "stage", "data": {"stage": "critiques", "status": "starting", "total": len(members)}}
 
         critique_tasks: dict[asyncio.Task, PresetMember] = {}
@@ -663,7 +666,7 @@ async def run_council_streaming(
                 chair_text = await bridge.send_message(
                     session_id=session.id,
                     model=preset.chair.model,
-                    system="You are the Chair of a scientific writing council. Synthesize, do not average.",
+                    system=env.pipeline.prompts.chair_system,
                     parts=[{"type": "text", "text": chair_prompt}],
                     tools={},
                     log_session_id=log_session_id,
@@ -760,7 +763,7 @@ async def _call_member_revision(
     scratchpad: str | None = None,
     log_session_id: str | None = None,
 ) -> MemberResult:
-    system = f"Role: {member.role}\n\n{member.contract}\n\nYou are participating in a multi-round debate. Revise your analysis based on peer feedback."
+    system = f"Role: {member.role}\n\n{member.contract}\n\n{env.pipeline.prompts.revision_system_suffix}"
     prompt = _build_revision_prompt(member, text, own_review, all_member_results, critiques, scratchpad)
     async with bridge.session_context() as session:
         response = await bridge.send_message(
@@ -778,7 +781,7 @@ async def _call_member_revision(
         analysis=_clean_response(response),
         recommendation=None,
         risks=[],
-        confidence=0.5,
+        confidence=DEFAULT_CONFIDENCE,
     )
 
 
@@ -840,8 +843,8 @@ async def run_council_debate(
             except Exception as e:
                 pass
 
-    if len(member_results) < 2:
-        yield {"event": "error", "data": "Quorum not met"}
+    if len(member_results) < DEFAULT_QUORUM:
+        yield {"event": "error", "data": f"Quorum not met ({len(member_results)}/{DEFAULT_QUORUM})"}
         return
 
     yield {"event": "stage", "data": {"stage": "debate", "status": "round_2_critique", "round": 2, "total": 4}}
@@ -916,7 +919,7 @@ async def run_council_debate(
                 chair_text = await bridge.send_message(
                     session_id=session.id,
                     model=preset.chair.model,
-                    system="You are the Chair of a scientific writing council. Synthesize, do not average.",
+                    system=env.pipeline.prompts.chair_system,
                     parts=[{"type": "text", "text": chair_prompt}],
                     tools={},
                     log_session_id=log_session_id,
@@ -973,7 +976,7 @@ async def _stream_member_revision(
     scratchpad: str | None = None,
     log_session_id: str | None = None,
 ) -> AsyncIterator[tuple[str, str, list[str], float]]:
-    system = f"Role: {member.role}\n\n{member.contract}\n\nYou are participating in a multi-round debate. Revise your analysis based on peer feedback."
+    system = f"Role: {member.role}\n\n{member.contract}\n\n{env.pipeline.prompts.revision_system_suffix}"
     prompt = _build_revision_prompt(member, text, own_review, all_member_results, critiques, scratchpad)
 
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -992,7 +995,7 @@ async def _stream_member_revision(
                 await queue.put(None)
 
         listener = asyncio.create_task(listen())
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(env.pipeline.stream_delay_seconds)
 
         await bridge.send_message_async(
             session_id=session.id,
@@ -1005,7 +1008,7 @@ async def _stream_member_revision(
 
         full = ""
         risks: list[str] = []
-        confidence = 0.5
+        confidence = DEFAULT_CONFIDENCE
         while True:
             ev = await queue.get()
             if ev is None:
@@ -1080,7 +1083,7 @@ async def run_council_debate_streaming(
                         yield {"event": "member_text", "data": {"member_id": m.id, "text": full_text, "round": 1}}
                 result = MemberResult(
                     member_id=m.id, role=m.role, model=m.model,
-                    analysis=full_text, recommendation=None, risks=[], confidence=0.5, round=1,
+                    analysis=full_text, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE, round=1,
                 )
                 member_results.append(result)
                 previous.append((m.id, m.role, full_text))
@@ -1118,7 +1121,7 @@ async def run_council_debate_streaming(
                 m = next(m for m in members if m.id == mid)
                 result = MemberResult(
                     member_id=mid, role=m.role, model=m.model,
-                    analysis=val, recommendation=None, risks=[], confidence=0.5, round=1,
+                    analysis=val, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE, round=1,
                 )
                 member_results.append(result)
                 yield {"event": "member_done", "data": {
@@ -1132,8 +1135,8 @@ async def run_council_debate_streaming(
         for t in tasks:
             t.cancel()
 
-    if len(member_results) < 2:
-        yield {"event": "error", "data": "Quorum not met"}
+    if len(member_results) < DEFAULT_QUORUM:
+        yield {"event": "error", "data": f"Quorum not met ({len(member_results)}/{DEFAULT_QUORUM})"}
         return
 
     yield {"event": "stage", "data": {"stage": "debate", "status": "round_2_critique", "round": 2, "total": 4}}
@@ -1177,7 +1180,7 @@ async def run_council_debate_streaming(
             m = next(m for m in members if m.id == mid)
             result = MemberResult(
                 member_id=m.id, role=m.role, model=m.model,
-                analysis=full_text, recommendation=None, risks=[], confidence=0.5, round=3,
+                analysis=full_text, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE, round=3,
             )
             revised.append(result)
             yield {"event": "member_revision", "data": {
@@ -1220,7 +1223,7 @@ async def run_council_debate_streaming(
                 chair_text = await bridge.send_message(
                     session_id=session.id,
                     model=preset.chair.model,
-                    system="You are the Chair of a scientific writing council. Synthesize, do not average.",
+                    system=env.pipeline.prompts.chair_system,
                     parts=[{"type": "text", "text": chair_prompt}],
                     tools={},
                     log_session_id=log_session_id,

@@ -3,7 +3,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEBUG_DIR = Path(__file__).parent.parent / "data" / "debug"
+from backend.config import env
+
+DEBUG_DIR = env.resolve_debug_dir()
 
 
 def _ensure_dir() -> Path:
