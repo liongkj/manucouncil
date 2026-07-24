@@ -16,18 +16,6 @@ const MEMBER_COLORS = [
   { bg: 'bg-rose-50', border: 'border-rose-200', text: 'text-rose-800', dot: 'bg-rose-400' },
 ]
 
-function confidenceColor(c: number): string {
-  if (c >= 0.8) return 'bg-green-100 text-green-700'
-  if (c >= 0.5) return 'bg-yellow-100 text-yellow-700'
-  return 'bg-red-100 text-red-700'
-}
-
-function riskBadge(count: number): string {
-  if (count === 0) return ''
-  if (count <= 2) return `⚠${count}`
-  return `⚠${count}+`
-}
-
 function chairIcon(v: string): string {
   const lower = v.toLowerCase()
   if (lower.includes('revise') || lower.includes('reject') || lower.includes('flag')) return '\u26A0'
@@ -111,7 +99,6 @@ function MemberSeat({ member, color, active, onClick }: {
   active: boolean
   onClick: () => void
 }) {
-  const riskStr = riskBadge(member.risks.length)
   return (
     <button
       onClick={onClick}
@@ -119,16 +106,8 @@ function MemberSeat({ member, color, active, onClick }: {
         ${color.bg} ${color.border}
         ${active ? 'ring-2 ring-council-300 scale-105 shadow-md' : 'hover:scale-105 shadow-sm'}`}
     >
-      {riskStr && (
-        <span className="absolute -top-1.5 -right-1.5 text-[9px] bg-red-100 text-red-700 rounded-full px-1 font-medium">
-          {riskStr}
-        </span>
-      )}
       <div className={`w-2 h-2 rounded-full mb-1 ${color.dot}`} />
       <span className={`text-[10px] font-semibold leading-tight text-center ${color.text}`}>{member.role}</span>
-      <span className={`text-[8px] font-medium px-1 rounded mt-0.5 ${confidenceColor(member.confidence)}`}>
-        {Math.round(member.confidence * 100)}%
-      </span>
     </button>
   )
 }

@@ -49,8 +49,6 @@ export default function CouncilDiscussion({ members, critiques, chair, inProgres
                 <div className="flex-1 min-w-0">
                   <ChatBubble
                     text={m.analysis}
-                    risks={m.risks}
-                    confidence={m.confidence}
                     role={m.role}
                     newArrival={inProgress && i === sorted.length - 1}
                   />
@@ -103,10 +101,8 @@ export default function CouncilDiscussion({ members, critiques, chair, inProgres
   )
 }
 
-function ChatBubble({ text, risks, confidence, role, newArrival }: {
+function ChatBubble({ text, role, newArrival }: {
   text: string
-  risks: string[]
-  confidence: number
   role: string
   newArrival?: boolean
 }) {
@@ -128,40 +124,11 @@ function ChatBubble({ text, risks, confidence, role, newArrival }: {
   return (
     <div className={`rounded-xl border ${borderColor} ${bgColor} shadow-sm overflow-hidden
       ${newArrival ? 'ring-2 ring-council-300' : ''}`}>
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-inherit bg-white/60">
-        {newArrival && (
-          <span className="flex gap-0.5">
-            <span className="w-1 h-2 bg-council-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-            <span className="w-1 h-2 bg-council-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-            <span className="w-1 h-2 bg-council-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-          </span>
-        )}
-        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
-          confidence >= 0.7 ? 'bg-green-100 text-green-700' :
-          confidence >= 0.4 ? 'bg-yellow-100 text-yellow-700' :
-          'bg-red-100 text-red-700'
-        }`}>
-          {Math.round(confidence * 100)}% confident
-        </span>
-        {risks.length > 0 && (
-          <span className="text-[10px] bg-red-50 text-red-600 rounded px-1.5 py-0.5">
-            {risks.length} risk{risks.length > 1 ? 's' : ''}
-          </span>
-        )}
-      </div>
       <div className="px-3 py-2 text-xs text-gray-700 space-y-1">
           <div className="leading-relaxed whitespace-pre-wrap line-clamp-3">{preview}</div>
         <details className="text-[10px]">
           <summary className="cursor-pointer text-gray-500 hover:text-gray-700 font-medium">Full analysis</summary>
           <div className="mt-1 pt-1 border-t border-gray-100 max-h-64 overflow-y-auto whitespace-pre-wrap leading-relaxed">
-            {risks.length > 0 && (
-              <div className="mb-2 p-2 bg-red-50 border border-red-200 rounded text-[10px] text-red-700">
-                <strong>Risks:</strong>
-                <ul className="list-disc list-inside mt-0.5">
-                  {risks.map((r, i) => <li key={i}>{r}</li>)}
-                </ul>
-              </div>
-            )}
             {clean}
           </div>
         </details>
@@ -175,14 +142,15 @@ function CritiqueBubble({ critique, allMembers }: {
   allMembers: MemberResult[]
 }) {
   const reviewer = allMembers.find(m => m.member_id === critique.reviewer_id)
-  const cleanDisagreements = useMemo(() =>
-    critique.disagreements.map(d => cleanResponse(d)),
-  [critique])
-  const preview = useMemo(() => {
-    return cleanDisagreements.join(' ').slice(0, 150) + '...'
-  }, [cleanDisagreements])
 
-  if (!critique.disagreements.length) return null
+  const hasContent = critique.rankings.length > 0
+    || Object.keys(critique.strongest_points).length > 0
+    || Object.keys(critique.weaknesses).length > 0
+    || critique.disagreements.length > 0
+
+  if (!hasContent) return null
+
+  const labels = critique.rankings
 
   return (
     <div className="animate-slide-in rounded-lg border border-gray-200 bg-white shadow-sm overflow-hidden">
@@ -192,14 +160,50 @@ function CritiqueBubble({ critique, allMembers }: {
         </svg>
         <span>Peer critique by {reviewer?.role ?? critique.reviewer_id}</span>
       </div>
-      <div className="px-2.5 py-1.5 text-[10px] text-gray-600 space-y-0.5">
-        <div className="leading-relaxed line-clamp-2">{preview}</div>
-        <details className="text-[9px] mt-0.5">
-          <summary className="cursor-pointer text-gray-400 hover:text-gray-600">Show all</summary>
-          <div className="mt-1 pt-1 border-t border-gray-100 max-h-40 overflow-y-auto leading-relaxed">
-            {cleanDisagreements.map((d, i) => <p key={i} className="mb-1">{d}</p>)}
+      <div className="px-2.5 py-1.5 text-[10px] text-gray-600 space-y-1">
+        {labels.length > 0 && (
+          <div className="text-[9px] text-gray-400 mb-1">
+            Ranking: {labels.map((l, i) => {
+              const mid = critique.label_map?.[l]
+              const role = mid ? allMembers.find(m => m.member_id === mid)?.role : null
+              return `${i + 1}. ${l}${role ? ` (${role})` : ''}`
+            }).join(' → ')}
           </div>
-        </details>
+        )}
+
+        {labels.map(label => {
+          const mid = critique.label_map?.[label]
+          const role = mid ? allMembers.find(m => m.member_id === mid)?.role : null
+          const points = critique.strongest_points?.[label]
+          const weaks = critique.weaknesses?.[label]
+          if ((!points || points.length === 0) && (!weaks || weaks.length === 0)) return null
+          return (
+            <div key={label} className="border-t border-gray-100 pt-1 mt-1">
+              <div className="text-[9px] font-medium text-gray-500">Response {label}{role ? ` (${role})` : ''}</div>
+              {points && points.length > 0 && (
+                <div className="ml-1 mt-0.5">
+                  <span className="text-[9px] text-green-700">Strengths: </span>
+                  <span className="text-[9px] text-gray-600">{points.join('; ')}</span>
+                </div>
+              )}
+              {weaks && weaks.length > 0 && (
+                <div className="ml-1 mt-0.5">
+                  <span className="text-[9px] text-amber-700">Weaknesses: </span>
+                  <span className="text-[9px] text-gray-600">{weaks.join('; ')}</span>
+                </div>
+              )}
+            </div>
+          )
+        })}
+
+        {critique.disagreements.length > 0 && (
+          <div className="border-t border-gray-100 pt-1 mt-1">
+            <span className="text-[9px] text-red-600">Disagreements:</span>
+            <div className="text-[9px] text-gray-500">
+              {critique.disagreements.map((d, i) => <p key={i} className="mt-0.5">{d}</p>)}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

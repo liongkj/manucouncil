@@ -3,6 +3,7 @@ import type { Message, ModelRef, PresetConfig, CouncilResponse, AvailableModels,
 import { DEFAULT_SETTINGS, type Settings } from './types'
 import Chat from './Chat'
 import SettingsPanel from './Settings'
+import DebugPanel from './DebugPanel'
 
 const SETTINGS_KEY = 'research-council-settings'
 
@@ -29,6 +30,8 @@ export default function App() {
   const [serverOk, setServerOk] = useState(false)
   const [settings, setSettings] = useState<Settings>(loadSettings)
   const [showSettings, setShowSettings] = useState(false)
+  const [showDebug, setShowDebug] = useState(false)
+  const [sessionId, setSessionId] = useState<string | null>(null)
   const [councilProgress, setCouncilProgress] = useState<CouncilResponse | null>(null)
 
   useEffect(() => {
@@ -44,6 +47,10 @@ export default function App() {
       .then(r => r.json())
       .then((d: AvailableModels) => setAvailableModels(d.models || []))
       .catch(() => {})
+    fetch('/api/sessions', { method: 'POST' })
+      .then(r => r.json())
+      .then(s => setSessionId(s.id))
+      .catch(() => {})
   }, [])
 
   const handleSettingsSave = useCallback((s: Settings) => {
@@ -56,10 +63,12 @@ export default function App() {
   }, [])
 
   const handleSingleModel = useCallback(async (text: string, model: ModelRef) => {
+    const body: Record<string, unknown> = { text, model, stream: false }
+    if (sessionId) body.app_session_id = sessionId
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, model, stream: false }),
+      body: JSON.stringify(body),
     })
     const data = await res.json()
     setMessages(prev => [...prev, {
@@ -67,7 +76,7 @@ export default function App() {
       text: data.text,
       model: data.model,
     }])
-  }, [])
+  }, [sessionId])
 
   const handleEvent = useCallback((ev: string, d: any, presetId: string, presetLabel?: string) => {
     if (ev === 'member_text') {
@@ -98,26 +107,12 @@ export default function App() {
     } else if (ev === 'member_done') {
       setCouncilProgress(prev => prev ? {
         ...prev,
-        members: [...prev.members.filter(m => m.member_id !== d.member_id), {
-          member_id: d.member_id,
-          role: d.role,
-          model: d.model,
-          analysis: d.analysis,
-          recommendation: null,
-          risks: d.risks || [],
-          confidence: d.confidence || 0.5,
-        }],
+        members: [...prev.members.filter(m => m.member_id !== d.member_id), d],
       } : prev)
     } else if (ev === 'critique_done') {
       setCouncilProgress(prev => prev ? {
         ...prev,
-        critiques: [...(prev.critiques || []), {
-          reviewer_id: d.reviewer_id,
-          rankings: [],
-          strongest_points: [],
-          weaknesses: {},
-          disagreements: d.disagreements || [],
-        }],
+        critiques: [...(prev.critiques || []), d],
       } : prev)
     } else if (ev === 'chair_done') {
       setCouncilProgress(prev => prev ? {
@@ -157,6 +152,7 @@ export default function App() {
     const overrides = settings.modelOverrides[presetId]
     const contractOverrides = settings.customContracts[presetId]
     const body: Record<string, unknown> = { text, preset_id: presetId, scratchpad, mode: councilMode }
+    if (sessionId) body.app_session_id = sessionId
     if (overrides && Object.keys(overrides).length > 0) {
       body.model_overrides = overrides
     }
@@ -253,8 +249,10 @@ export default function App() {
           presets={presets}
           models={availableModels}
           settings={settings}
+          sessionId={sessionId}
           onSend={onSend}
           onAppendMessage={appendMessage}
+          onOpenDebug={() => setShowDebug(true)}
           loading={loading}
           councilProgress={councilProgress}
           onOpenSettings={() => setShowSettings(true)}
@@ -269,6 +267,12 @@ export default function App() {
           models={availableModels}
           onSave={handleSettingsSave}
           onClose={() => setShowSettings(false)}
+        />
+      )}
+      {showDebug && (
+        <DebugPanel
+          sessionId={sessionId}
+          onClose={() => setShowDebug(false)}
         />
       )}
     </div>

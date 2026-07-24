@@ -38,6 +38,7 @@ class ChatRequest(BaseModel):
     stream: bool = True
     system: str | None = None
     session_id: str | None = None
+    app_session_id: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -52,14 +53,16 @@ class CouncilRequest(BaseModel):
     mode: Literal["council", "debate"] = "council"
     model_overrides: dict[str, ModelRef] | None = None
     contract_overrides: dict[str, str] | None = None
+    app_session_id: str | None = None
 
 
 class Critique(BaseModel):
     reviewer_id: str
     rankings: list[str]
-    strongest_points: list[str]
+    strongest_points: dict[str, list[str]]
     weaknesses: dict[str, list[str]]
     disagreements: list[str]
+    label_map: dict[str, str] = {}
 
 
 class MemberResult(BaseModel):
@@ -70,6 +73,7 @@ class MemberResult(BaseModel):
     recommendation: str | None
     risks: list[str]
     confidence: float
+    round: int | None = None
 
 
 class ChairResult(BaseModel):
@@ -101,3 +105,8 @@ class SSEEvent(BaseModel):
     type: str
     content: str
     done: bool = False
+
+
+class CouncilSSEEvent(BaseModel):
+    event: str
+    data: dict

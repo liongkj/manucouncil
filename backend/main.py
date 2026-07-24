@@ -21,9 +21,9 @@ from backend.models import (
     PresetConfig,
     SessionInfo,
 )
-from backend.pipeline import run_council, run_council_streaming, run_council_debate
+from backend.pipeline import run_council, run_council_streaming, run_council_debate, run_council_debate_streaming
 from backend.presets import get_preset, list_presets
-from backend import storage
+from backend import debug_log, storage
 
 
 bridge: OpenCodeBridge | None = None
@@ -138,6 +138,23 @@ _models_cache: list[dict] | None = None
 _models_cache_ts: float = 0
 _MODELS_CACHE_TTL = 60
 
+
+def _resolve_session(req: ChatRequest | CouncilRequest) -> str:
+    sid = getattr(req, "app_session_id", None)
+    if sid:
+        existing = storage.get_session(sid)
+        if existing:
+            return existing["id"]
+    title = "Chat" if isinstance(req, ChatRequest) else f"Council: {getattr(req, 'preset_id', '')}"
+    return storage.create_session(title)["id"]
+
+
+def _preset_label(preset_id: str) -> str:
+    try:
+        return get_preset(preset_id).label
+    except ValueError:
+        return preset_id
+
 @app.get("/api/models")
 async def list_models():
     global _models_cache, _models_cache_ts
@@ -200,22 +217,42 @@ async def get_preset_route(preset_id: str):
 async def chat(req: ChatRequest):
     if bridge is None:
         raise HTTPException(503, "Bridge not initialized")
+    app_session_id = _resolve_session(req)
+    debug_log.append(app_session_id, {
+        "type": "chat_start",
+        "model": req.model.model_dump(),
+        "text": req.text,
+        "system": req.system,
+    })
     if req.stream:
         return await _stream_chat(req)
-    async with bridge.session_context() as session:
-        text = await bridge.send_message(
-            session_id=session.id,
-            model=req.model,
-            system=req.system or "",
-            parts=[{"type": "text", "text": req.text}],
-            tools={},
-        )
-    return {"text": text, "model": req.model.model_dump()}
+    try:
+        async with bridge.session_context() as session:
+            text = await bridge.send_message(
+                session_id=session.id,
+                model=req.model,
+                system=req.system or "",
+                parts=[{"type": "text", "text": req.text}],
+                tools={},
+                log_session_id=app_session_id,
+            )
+        debug_log.append(app_session_id, {
+            "type": "chat_complete",
+            "response": text,
+        })
+        return {"text": text, "model": req.model.model_dump()}
+    except Exception as e:
+        debug_log.append(app_session_id, {
+            "type": "chat_error",
+            "error": str(e),
+        })
+        raise
 
 
 async def _stream_chat(req: ChatRequest) -> EventSourceResponse:
     if bridge is None:
         raise HTTPException(503, "Bridge not initialized")
+    app_session_id = _resolve_session(req)
 
     async def event_generator() -> AsyncIterator[dict]:
         session = await bridge.create_session()
@@ -231,6 +268,7 @@ async def _stream_chat(req: ChatRequest) -> EventSourceResponse:
             finally:
                 await queue.put(None)
 
+        full_response = ""
         listener = asyncio.create_task(listen())
         try:
             await asyncio.sleep(0.05)
@@ -240,6 +278,7 @@ async def _stream_chat(req: ChatRequest) -> EventSourceResponse:
                 system=req.system or "",
                 parts=[{"type": "text", "text": req.text}],
                 tools={},
+                log_session_id=app_session_id,
             )
             while True:
                 ev = await queue.get()
@@ -250,6 +289,7 @@ async def _stream_chat(req: ChatRequest) -> EventSourceResponse:
                 if ev_type == "message.part.delta":
                     delta = props.get("delta", "")
                     if delta:
+                        full_response += delta
                         yield {"event": "chunk", "data": delta}
                 elif ev_type == "message.part.updated":
                     part = props.get("part", {})
@@ -258,12 +298,24 @@ async def _stream_chat(req: ChatRequest) -> EventSourceResponse:
                 elif ev_type == "session.status":
                     status = props.get("status", {})
                     if status.get("type") == "idle":
+                        debug_log.append(app_session_id, {
+                            "type": "chat_complete",
+                            "response": full_response,
+                        })
                         yield {"event": "done", "data": ""}
                         return
                 elif ev_type == "session.idle":
+                    debug_log.append(app_session_id, {
+                        "type": "chat_complete",
+                        "response": full_response,
+                    })
                     yield {"event": "done", "data": ""}
                     return
                 elif ev_type == "error":
+                    debug_log.append(app_session_id, {
+                        "type": "chat_error",
+                        "error": ev.get("content", ""),
+                    })
                     yield {"event": "error", "data": ev.get("content", "")}
                     return
             yield {"event": "done", "data": ""}
@@ -283,9 +335,25 @@ async def council_stream(req: CouncilRequest):
     if bridge is None:
         raise HTTPException(503, "Bridge not initialized")
 
+    app_session_id = _resolve_session(req)
+
     async def event_generator() -> AsyncIterator[dict]:
         try:
-            pipeline = run_council_debate if req.mode == "debate" else run_council_streaming
+            preset_label = _preset_label(req.preset_id)
+            debug_log.append(app_session_id, {
+                "type": "council_start",
+                "mode": req.mode,
+                "preset_id": req.preset_id,
+                "preset_label": preset_label,
+                "text": req.text,
+                "scratchpad": req.scratchpad,
+                "model_overrides": req.model_overrides,
+                "contract_overrides": req.contract_overrides,
+            })
+            if req.mode == "debate":
+                pipeline = run_council_debate_streaming
+            else:
+                pipeline = run_council_streaming
             async for ev in pipeline(
                 bridge=bridge,
                 preset_id=req.preset_id,
@@ -293,9 +361,18 @@ async def council_stream(req: CouncilRequest):
                 scratchpad=req.scratchpad,
                 model_overrides=req.model_overrides,
                 contract_overrides=req.contract_overrides,
+                log_session_id=app_session_id,
             ):
                 yield {"event": ev["event"], "data": json.dumps(ev["data"])}
+            debug_log.append(app_session_id, {
+                "type": "council_complete",
+                "preset_id": req.preset_id,
+            })
         except Exception as e:
+            debug_log.append(app_session_id, {
+                "type": "council_error",
+                "error": str(e),
+            })
             yield {"event": "error", "data": json.dumps(str(e))}
         finally:
             yield {"event": "done", "data": "{}"}
@@ -312,6 +389,14 @@ async def council(req: CouncilRequest):
     except ValueError as e:
         raise HTTPException(404, str(e))
 
+    app_session_id = _resolve_session(req)
+    debug_log.append(app_session_id, {
+        "type": "council_start",
+        "mode": req.mode,
+        "preset_id": req.preset_id,
+        "text": req.text,
+    })
+
     try:
         if req.mode == "debate":
             from backend.pipeline import run_council_debate_nonstream
@@ -322,6 +407,7 @@ async def council(req: CouncilRequest):
                 scratchpad=req.scratchpad,
                 model_overrides=req.model_overrides,
                 contract_overrides=req.contract_overrides,
+                log_session_id=app_session_id,
             )
         else:
             members, chair, critiques = await run_council(
@@ -331,10 +417,19 @@ async def council(req: CouncilRequest):
                 scratchpad=req.scratchpad,
                 model_overrides=req.model_overrides,
                 contract_overrides=req.contract_overrides,
+                log_session_id=app_session_id,
             )
     except Exception as e:
+        debug_log.append(app_session_id, {
+            "type": "council_error",
+            "error": str(e),
+        })
         raise HTTPException(500, f"Council pipeline failed: {e}")
 
+    debug_log.append(app_session_id, {
+        "type": "council_complete",
+        "preset_id": req.preset_id,
+    })
     return CouncilResponse(
         preset_id=req.preset_id,
         text=req.text,
@@ -377,3 +472,13 @@ async def delete_session(session_id: str):
     if not storage.delete_session(session_id):
         raise HTTPException(404, "Session not found")
     return {"ok": True}
+
+
+@app.get("/api/debug/logs")
+async def list_debug_logs():
+    return debug_log.list_logs()
+
+
+@app.get("/api/debug/logs/{session_id}")
+async def get_debug_log(session_id: str):
+    return debug_log.get_log(session_id)

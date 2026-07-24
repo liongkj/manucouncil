@@ -9,15 +9,17 @@ interface Props {
   presets: PresetConfig[]
   models: ModelOption[]
   settings: Settings
+  sessionId: string | null
   onSend: (text: string, mode: 'single' | 'council', model: ModelRef, presetId: string, scratchpad: string, councilMode?: string) => Promise<void>
   onAppendMessage: (msg: Message) => void
+  onOpenDebug: () => void
   loading: boolean
   councilProgress: CouncilResponse | null
   onOpenSettings: () => void
   onSettingsChange: (s: Settings) => void
 }
 
-export default function Chat({ messages, presets, models, settings, onSend, onAppendMessage, loading, councilProgress, onOpenSettings, onSettingsChange }: Props) {
+export default function Chat({ messages, presets, models, settings, sessionId, onSend, onAppendMessage, onOpenDebug, loading, councilProgress, onOpenSettings, onSettingsChange }: Props) {
   const [input, setInput] = useState('')
   const [mode, setMode] = useState<'single' | 'council'>('single')
   const [model, setModel] = useState<ModelRef>(settings.defaultModel)
@@ -48,10 +50,12 @@ export default function Chat({ messages, presets, models, settings, onSend, onAp
       setStreamingText('')
 
       try {
+        const body: Record<string, unknown> = { text, model, stream: true }
+        if (sessionId) body.app_session_id = sessionId
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, model, stream: true }),
+          body: JSON.stringify(body),
         })
         if (!res.ok || !res.body) throw new Error('Stream failed')
 
@@ -282,6 +286,15 @@ export default function Chat({ messages, presets, models, settings, onSend, onAp
               </div>
             )}
             <div className="flex-1" />
+            <button
+              onClick={onOpenDebug}
+              className="text-gray-400 hover:text-gray-600 p-1 transition-colors"
+              title="Debug Log"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M3 3h10v2H3zM3 7h10v2H3zM3 11h7v2H3z" />
+              </svg>
+            </button>
             <button
               onClick={onOpenSettings}
               className="text-gray-400 hover:text-gray-600 p-1 transition-colors"
