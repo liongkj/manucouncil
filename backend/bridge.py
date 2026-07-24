@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -7,6 +8,7 @@ import httpx
 from httpx import BasicAuth, HTTPError, Timeout
 
 from backend.models import ModelRef
+from backend import debug_log
 
 
 class BridgeError(Exception):
@@ -78,11 +80,14 @@ class OpenCodeBridge:
         parts: list[dict],
         tools: dict | None = None,
         retries: int = 1,
+        log_session_id: str | None = None,
     ) -> str:
         last_error: Exception | None = None
+        payload = self._build_message_payload(model, system, parts, tools)
+        user_text = next((p["text"] for p in parts if p.get("type") == "text"), "")
+        start = time.time()
         for attempt in range(retries + 1):
             try:
-                payload = self._build_message_payload(model, system, parts, tools)
                 r = await self._client.post(
                     f"{self.base_url}/session/{session_id}/message",
                     json=payload,
@@ -92,14 +97,51 @@ class OpenCodeBridge:
                         f"send_message failed: {r.status_code} {r.text[:500]}"
                     )
                 data = r.json()
-                return _extract_text(data)
+                response_text = _extract_text(data)
+                elapsed = time.time() - start
+                if log_session_id:
+                    debug_log.append(log_session_id, {
+                        "type": "bridge_call",
+                        "method": "send_message",
+                        "model": model.model_dump(),
+                        "system_prompt": system,
+                        "user_text": user_text,
+                        "response": response_text,
+                        "attempts": attempt + 1,
+                        "elapsed_seconds": round(elapsed, 2),
+                    })
+                return response_text
             except HTTPError as e:
                 last_error = e
                 if attempt < retries:
                     await asyncio.sleep(2 ** attempt)
                     continue
+                elapsed = time.time() - start
+                if log_session_id:
+                    debug_log.append(log_session_id, {
+                        "type": "bridge_error",
+                        "method": "send_message",
+                        "model": model.model_dump(),
+                        "system_prompt": system,
+                        "user_text": user_text,
+                        "error": str(e),
+                        "attempts": attempt + 1,
+                        "elapsed_seconds": round(elapsed, 2),
+                    })
                 raise BridgeError(f"send_message failed after {retries + 1} attempts: {e}") from e
             except Exception as e:
+                elapsed = time.time() - start
+                if log_session_id:
+                    debug_log.append(log_session_id, {
+                        "type": "bridge_error",
+                        "method": "send_message",
+                        "model": model.model_dump(),
+                        "system_prompt": system,
+                        "user_text": user_text,
+                        "error": str(e),
+                        "attempts": attempt + 1,
+                        "elapsed_seconds": round(elapsed, 2),
+                    })
                 raise BridgeError(f"send_message error: {e}") from e
 
     async def send_message_async(
@@ -109,16 +151,40 @@ class OpenCodeBridge:
         system: str,
         parts: list[dict],
         tools: dict | None = None,
+        log_session_id: str | None = None,
     ) -> None:
         payload = self._build_message_payload(model, system, parts, tools)
+        user_text = next((p["text"] for p in parts if p.get("type") == "text"), "")
+        start = time.time()
         r = await self._client.post(
             f"{self.base_url}/session/{session_id}/prompt_async",
             json=payload,
         )
+        elapsed = time.time() - start
         if r.status_code not in (200, 204):
+            if log_session_id:
+                debug_log.append(log_session_id, {
+                    "type": "bridge_error",
+                    "method": "send_message_async",
+                    "model": model.model_dump(),
+                    "system_prompt": system,
+                    "user_text": user_text,
+                    "error": f"status {r.status_code}: {r.text[:500]}",
+                    "elapsed_seconds": round(elapsed, 2),
+                })
             raise BridgeError(
                 f"send_message_async failed: {r.status_code} {r.text[:500]}"
             )
+        if log_session_id:
+            debug_log.append(log_session_id, {
+                "type": "bridge_call",
+                "method": "send_message_async",
+                "model": model.model_dump(),
+                "system_prompt": system,
+                "user_text": user_text,
+                "response": None,
+                "elapsed_seconds": round(elapsed, 2),
+            })
 
     async def stream_events(self) -> AsyncIterator[dict]:
         try:

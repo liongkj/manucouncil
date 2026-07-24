@@ -32,16 +32,7 @@ function MemberCard({ member, streaming }: { member: MemberResult; streaming?: b
         {streaming && (
           <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
         )}
-        <span className={`w-1.5 h-1.5 rounded-full ${member.confidence >= 0.7 ? 'bg-green-500' : member.confidence >= 0.4 ? 'bg-yellow-500' : 'bg-red-500'}`} />
         <span className="font-semibold flex-1">{member.role}</span>
-        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${c.badge}`}>
-          {Math.round(member.confidence * 100)}% confident
-        </span>
-        {member.risks.length > 0 && (
-          <span className="text-[10px] bg-red-100 text-red-700 rounded px-1.5 py-0.5 font-medium">
-            {member.risks.length} risk{member.risks.length > 1 ? 's' : ''}
-          </span>
-        )}
       </div>
       <div className="px-3 py-2 text-xs text-gray-700 space-y-1">
         {summary && (
@@ -52,14 +43,6 @@ function MemberCard({ member, streaming }: { member: MemberResult; streaming?: b
         <details className="text-[10px] text-gray-500">
           <summary className="cursor-pointer hover:text-gray-700">Show full analysis</summary>
           <div className="mt-1 pt-1 border-t border-gray-100 max-h-80 overflow-y-auto whitespace-pre-wrap leading-relaxed">
-            {member.risks.length > 0 && (
-              <div className="mb-2 p-2 bg-red-50 border border-red-200 rounded text-[10px] text-red-700">
-                <strong>Risks:</strong>
-                <ul className="list-disc list-inside mt-0.5">
-                  {member.risks.map((r, i) => <li key={i}>{r}</li>)}
-                </ul>
-              </div>
-            )}
             {member.analysis}
           </div>
         </details>
@@ -70,10 +53,13 @@ function MemberCard({ member, streaming }: { member: MemberResult; streaming?: b
 
 function CritiqueCard({ critique, allMembers }: { critique: Critique; allMembers: MemberResult[] }) {
   const reviewer = allMembers.find(m => m.member_id === critique.reviewer_id)
-  const summary = useMemo(() => {
-    const text = critique.disagreements.join(' ')
-    return summaryFrom(text, 100)
-  }, [critique])
+
+  const hasContent = critique.rankings.length > 0
+    || Object.keys(critique.strongest_points).length > 0
+    || Object.keys(critique.weaknesses).length > 0
+    || critique.disagreements.length > 0
+
+  if (!hasContent) return null
 
   return (
     <div className="animate-slide-in border border-gray-200 rounded-xl overflow-hidden shadow-sm">
@@ -84,17 +70,47 @@ function CritiqueCard({ critique, allMembers }: { critique: Critique; allMembers
         <span className="font-medium">Peer review by {reviewer?.role ?? critique.reviewer_id}</span>
       </div>
       <div className="px-3 py-2 text-xs text-gray-700 space-y-1">
-        {summary && (
-          <div className="leading-relaxed whitespace-pre-wrap line-clamp-3">{summary}</div>
+        {critique.rankings.length > 0 && (
+          <div className="text-[10px] text-gray-500">
+            Ranking: {critique.rankings.map((l, i) => {
+              const mid = critique.label_map?.[l]
+              const role = mid ? allMembers.find(m => m.member_id === mid)?.role : null
+              return `${i + 1}. ${l}${role ? ` (${role})` : ''}`
+            }).join(' → ')}
+          </div>
         )}
-        <details className="text-[10px] text-gray-500">
-          <summary className="cursor-pointer hover:text-gray-700">Show full critique</summary>
-          <div className="mt-1 pt-1 border-t border-gray-100 max-h-60 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+        {critique.rankings.map(label => {
+          const mid = critique.label_map?.[label]
+          const role = mid ? allMembers.find(m => m.member_id === mid)?.role : null
+          const points = critique.strongest_points?.[label]
+          const weaks = critique.weaknesses?.[label]
+          if ((!points || points.length === 0) && (!weaks || weaks.length === 0)) return null
+          return (
+            <div key={label} className="border-t border-gray-100 pt-1 mt-1">
+              <div className="text-[10px] font-medium text-gray-500">Response {label}{role ? ` (${role})` : ''}</div>
+              {points && points.length > 0 && (
+                <div className="ml-1 mt-0.5 text-[11px]">
+                  <span className="text-green-700">Strengths: </span>
+                  <span className="text-gray-600">{points.join('; ')}</span>
+                </div>
+              )}
+              {weaks && weaks.length > 0 && (
+                <div className="ml-1 mt-0.5 text-[11px]">
+                  <span className="text-amber-700">Weaknesses: </span>
+                  <span className="text-gray-600">{weaks.join('; ')}</span>
+                </div>
+              )}
+            </div>
+          )
+        })}
+        {critique.disagreements.length > 0 && (
+          <div className="border-t border-gray-100 pt-1 mt-1">
+            <span className="text-[10px] text-red-600">Disagreements:</span>
             {critique.disagreements.map((d, i) => (
-              <div key={i} className="mb-1">{d}</div>
+              <p key={i} className="text-[11px] text-gray-500 mt-0.5">{d}</p>
             ))}
           </div>
-        </details>
+        )}
       </div>
     </div>
   )

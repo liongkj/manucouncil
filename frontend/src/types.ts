@@ -52,10 +52,11 @@ export interface MemberResult {
 export interface Critique {
   reviewer_id: string
   rankings: string[]
-  strongest_points: string[]
+  strongest_points: Record<string, string[]>
   weaknesses: Record<string, string[]>
   disagreements: string[]
   round?: number
+  label_map?: Record<string, string>
 }
 
 export interface ChairResult {

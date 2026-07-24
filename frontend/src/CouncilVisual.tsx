@@ -20,18 +20,6 @@ const MEMBER_COLORS = [
   { bg: 'bg-rose-50', border: 'border-rose-200', text: 'text-rose-800', dot: 'bg-rose-400', ring: 'ring-rose-300' },
 ]
 
-function confidenceColor(c: number): string {
-  if (c >= 0.8) return 'bg-green-100 text-green-700'
-  if (c >= 0.5) return 'bg-yellow-100 text-yellow-700'
-  return 'bg-red-100 text-red-700'
-}
-
-function riskBadge(count: number): string {
-  if (count === 0) return ''
-  if (count <= 2) return `⚠${count}`
-  return `⚠${count}+`
-}
-
 function chairIcon(v: string): string {
   const lower = v.toLowerCase()
   if (lower.includes('revise') || lower.includes('reject') || lower.includes('flag')) return '\u26A0'
@@ -50,6 +38,18 @@ function getRoundLabel(stage?: StageEvent): string {
     'chair_starting': 'Chair Synthesis',
   }
   return roundLabels[stage.status] || ''
+}
+
+function riskBadge(count: number): string {
+  if (count === 0) return ''
+  if (count <= 2) return '!'
+  return '!!'
+}
+
+function confidenceColor(score: number): string {
+  if (score >= 0.7) return 'text-green-600 bg-green-50'
+  if (score >= 0.4) return 'text-yellow-600 bg-yellow-50'
+  return 'text-red-600 bg-red-50'
 }
 
 export default function CouncilVisual({ members, chair, critiques, activeTab, onTabChange, stage, inProgress, mode = 'council' }: Props) {
