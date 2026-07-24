@@ -46,6 +46,7 @@ export interface MemberResult {
   recommendation: string | null
   risks: string[]
   confidence: number
+  round?: number
 }
 
 export interface Critique {
@@ -54,6 +55,7 @@ export interface Critique {
   strongest_points: Record<string, string[]>
   weaknesses: Record<string, string[]>
   disagreements: string[]
+  round?: number
   label_map?: Record<string, string>
 }
 
@@ -74,6 +76,13 @@ export interface CouncilResponse {
   critiques: Critique[] | null
 }
 
+export interface StageEvent {
+  stage: 'members' | 'critiques' | 'chair' | 'debate'
+  status: 'starting' | 'complete' | 'round_1_reviews' | 'round_2_critique' | 'round_3_revision' | 'round_4_final_critique' | 'chair_starting'
+  round?: number
+  total?: number
+}
+
 export interface Message {
   role: 'user' | 'assistant'
   text: string
@@ -88,6 +97,15 @@ export interface Settings {
   scratchpadVisible: boolean
   commissionedModels: string[]
   customContracts: Record<string, Record<string, string>>
+  scratchpadNotes: ScratchpadNote[]
+}
+
+export interface ScratchpadNote {
+  id: string
+  content: string
+  includeInPrompt: boolean
+  createdAt: string
+  sessionId?: string
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -96,4 +114,5 @@ export const DEFAULT_SETTINGS: Settings = {
   scratchpadVisible: false,
   commissionedModels: [],
   customContracts: {},
+  scratchpadNotes: [],
 }

@@ -25,6 +25,7 @@ export default function SettingsPanel({ settings, presets, models, onSave, onClo
     scratchpadVisible: settings.scratchpadVisible,
     commissionedModels: [...settings.commissionedModels],
     customContracts: JSON.parse(JSON.stringify(settings.customContracts)),
+    scratchpadNotes: settings.scratchpadNotes ? [...settings.scratchpadNotes] : [],
   }))
 
   const providers = models.reduce((acc: Record<string, ModelOption[]>, m) => {

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import type { Message, ModelRef, PresetConfig, CouncilResponse, Settings, ModelOption } from './types'
+import type { Message, ModelRef, PresetConfig, CouncilResponse, Settings, ModelOption, StageEvent } from './types'
 import ModelToggle from './ModelToggle'
 import CouncilResult from './CouncilResult'
 import Scratchpad from './Scratchpad'
@@ -15,11 +15,12 @@ interface Props {
   onOpenDebug: () => void
   loading: boolean
   councilProgress: CouncilResponse | null
+  currentStage?: StageEvent | null
   onOpenSettings: () => void
   onSettingsChange: (s: Settings) => void
 }
 
-export default function Chat({ messages, presets, models, settings, sessionId, onSend, onAppendMessage, onOpenDebug, loading, councilProgress, onOpenSettings, onSettingsChange }: Props) {
+export default function Chat({ messages, presets, models, settings, sessionId, onSend, onAppendMessage, onOpenDebug, loading, councilProgress, currentStage, onOpenSettings, onSettingsChange }: Props) {
   const [input, setInput] = useState('')
   const [mode, setMode] = useState<'single' | 'council'>('single')
   const [model, setModel] = useState<ModelRef>(settings.defaultModel)
@@ -162,7 +163,7 @@ export default function Chat({ messages, presets, models, settings, sessionId, o
                           </>
                         )}
                       </div>
-                      <CouncilResult result={msg.council} />
+                      <CouncilResult result={msg.council} councilMode={msg.council ? (msg.council.members.some(m => m.round !== undefined) ? 'debate' : 'council') : 'council'} />
                     </div>
                   ) : (
                     <div className="whitespace-pre-wrap">{msg.text}</div>
@@ -196,7 +197,7 @@ export default function Chat({ messages, presets, models, settings, sessionId, o
                       </div>
                     )}
                   </div>
-                  <CouncilResult result={councilProgress!} inProgress={true} />
+                  <CouncilResult result={councilProgress!} inProgress={true} currentStage={currentStage} councilMode={councilMode} />
                 </div>
               </div>
             </div>

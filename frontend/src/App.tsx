@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { Message, ModelRef, PresetConfig, CouncilResponse, AvailableModels, ModelOption } from './types'
+import type { Message, ModelRef, PresetConfig, CouncilResponse, AvailableModels, ModelOption, StageEvent } from './types'
 import { DEFAULT_SETTINGS, type Settings } from './types'
 import Chat from './Chat'
 import SettingsPanel from './Settings'
@@ -33,6 +33,7 @@ export default function App() {
   const [showDebug, setShowDebug] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [councilProgress, setCouncilProgress] = useState<CouncilResponse | null>(null)
+  const [currentStage, setCurrentStage] = useState<StageEvent | null>(null)
 
   useEffect(() => {
     fetch('/api/health')
@@ -87,7 +88,7 @@ export default function App() {
           return {
             ...prev,
             members: prev.members.map(m =>
-              m.member_id === d.member_id ? { ...m, analysis: d.text } : m
+              m.member_id === d.member_id ? { ...m, analysis: d.text, round: d.round } : m
             ),
           }
         }
@@ -101,18 +102,75 @@ export default function App() {
             recommendation: null,
             risks: [],
             confidence: 0.5,
+            round: d.round,
           }],
         }
       })
-    } else if (ev === 'member_done') {
+      } else if (ev === 'member_done') {
       setCouncilProgress(prev => prev ? {
         ...prev,
-        members: [...prev.members.filter(m => m.member_id !== d.member_id), d],
+        members: [...prev.members.filter(m => m.member_id !== d.member_id), {
+          member_id: d.member_id,
+          role: d.role,
+          model: d.model,
+          analysis: d.analysis,
+          recommendation: null,
+          risks: d.risks || [],
+          confidence: d.confidence || 0.5,
+          round: d.round,
+        }],
+      } : prev)
+    } else if (ev === 'member_revision_text') {
+      setCouncilProgress(prev => {
+        if (!prev) return prev
+        const existing = prev.members.find(m => m.member_id === d.member_id)
+        if (existing) {
+          return {
+            ...prev,
+            members: prev.members.map(m =>
+              m.member_id === d.member_id ? { ...m, analysis: d.text, round: d.round } : m
+            ),
+          }
+        }
+        return {
+          ...prev,
+          members: [...prev.members, {
+            member_id: d.member_id,
+            role: d.role || '',
+            model: { provider: '', model: '' },
+            analysis: d.text,
+            recommendation: null,
+            risks: [],
+            confidence: 0.5,
+            round: d.round,
+          }],
+        }
+      })
+    } else if (ev === 'member_revision') {
+      setCouncilProgress(prev => prev ? {
+        ...prev,
+        members: [...prev.members.filter(m => m.member_id !== d.member_id), {
+          member_id: d.member_id,
+          role: d.role,
+          model: d.model,
+          analysis: d.analysis,
+          recommendation: null,
+          risks: d.risks || [],
+          confidence: d.confidence || 0.5,
+          round: d.round,
+        }],
       } : prev)
     } else if (ev === 'critique_done') {
       setCouncilProgress(prev => prev ? {
         ...prev,
-        critiques: [...(prev.critiques || []), d],
+        critiques: [...(prev.critiques || []), {
+          reviewer_id: d.reviewer_id,
+          rankings: [] as string[],
+          strongest_points: {} as Record<string, string[]>,
+          weaknesses: {} as Record<string, string[]>,
+          disagreements: d.disagreements || [],
+          round: d.round,
+        }],
       } : prev)
     } else if (ev === 'chair_done') {
       setCouncilProgress(prev => prev ? {
@@ -126,6 +184,8 @@ export default function App() {
           rationale: d.rationale || '',
         },
       } : prev)
+    } else if (ev === 'stage') {
+      setCurrentStage(d)
     } else if (ev === 'done') {
       setCouncilProgress(prev => {
         if (prev) {
@@ -138,12 +198,14 @@ export default function App() {
         }
         return null
       })
+      setCurrentStage(null)
     } else if (ev === 'error') {
       setMessages(prev => [...prev, {
         role: 'assistant',
         text: `Council error: ${typeof d === 'string' ? d : JSON.stringify(d)}`,
       }])
       setCouncilProgress(null)
+      setCurrentStage(null)
     }
   }, [])
 
@@ -161,6 +223,7 @@ export default function App() {
     }
 
     setCouncilProgress({ preset_id: presetId, text, chair: null, members: [], critiques: [] })
+    setCurrentStage({ stage: councilMode === 'debate' ? 'debate' : 'members', status: 'starting', round: 1, total: councilMode === 'debate' ? 4 : 0 })
 
     const res = await fetch('/api/council/stream', {
       method: 'POST',
@@ -221,6 +284,7 @@ export default function App() {
         text: `Error: ${err instanceof Error ? err.message : 'Request failed'}`,
       }])
       setCouncilProgress(null)
+      setCurrentStage(null)
     } finally {
       setLoading(false)
     }
@@ -255,6 +319,7 @@ export default function App() {
           onOpenDebug={() => setShowDebug(true)}
           loading={loading}
           councilProgress={councilProgress}
+          currentStage={currentStage}
           onOpenSettings={() => setShowSettings(true)}
           onSettingsChange={handleSettingsSave}
         />
