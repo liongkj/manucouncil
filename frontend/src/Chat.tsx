@@ -9,7 +9,7 @@ interface Props {
   presets: PresetConfig[]
   models: ModelOption[]
   settings: Settings
-  onSend: (text: string, mode: 'single' | 'council', model: ModelRef, presetId: string, scratchpad: string) => Promise<void>
+  onSend: (text: string, mode: 'single' | 'council', model: ModelRef, presetId: string, scratchpad: string, councilMode?: string) => Promise<void>
   onAppendMessage: (msg: Message) => void
   loading: boolean
   councilProgress: CouncilResponse | null
@@ -22,6 +22,7 @@ export default function Chat({ messages, presets, models, settings, onSend, onAp
   const [mode, setMode] = useState<'single' | 'council'>('single')
   const [model, setModel] = useState<ModelRef>(settings.defaultModel)
   const [selectedPreset, setSelectedPreset] = useState('scientific-claim')
+  const [councilMode, setCouncilMode] = useState<'council' | 'debate'>('council')
   const [scratchpad, setScratchpad] = useState('')
   const [scratchpadVisible, setScratchpadVisible] = useState(settings.scratchpadVisible)
   const [streamingText, setStreamingText] = useState('')
@@ -100,7 +101,7 @@ export default function Chat({ messages, presets, models, settings, onSend, onAp
       }
     } else {
       onAppendMessage({ role: 'user', text })
-      await onSend(text, mode, model, selectedPreset, scratchpad)
+      await onSend(text, mode, model, selectedPreset, scratchpad, councilMode)
     }
   }
 
@@ -177,7 +178,7 @@ export default function Chat({ messages, presets, models, settings, onSend, onAp
               <div className="max-w-[85%] sm:max-w-[75%]">
                 <div className="bg-white border border-council-200 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm shadow-sm">
                   <div className="flex items-center gap-2 text-[10px] text-gray-500 uppercase tracking-wider mb-2">
-                    <span>Council in Progress</span>
+                    <span>Council in Progress{councilMode === 'debate' ? ' (Debate)' : ''}</span>
                     <span className="text-green-600">
                       {councilProgress!.members.length > 0
                         ? `${councilProgress!.members.length} member${councilProgress!.members.length !== 1 ? 's' : ''}${councilProgress!.critiques && councilProgress!.critiques.length > 0 ? `, ${councilProgress!.critiques.length} critique${councilProgress!.critiques.length !== 1 ? 's' : ''}` : ''}${councilProgress!.chair ? ', chair done' : ''}`
@@ -256,6 +257,30 @@ export default function Chat({ messages, presets, models, settings, onSend, onAp
               settings={settings}
               models={models}
             />
+            {mode === 'council' && (
+              <div className="flex rounded-lg border border-gray-300 overflow-hidden">
+                <button
+                  onClick={() => setCouncilMode('council')}
+                  className={`px-2 py-1.5 text-[10px] font-medium transition-colors
+                    ${councilMode === 'council'
+                      ? 'bg-council-500 text-white'
+                      : 'bg-white text-gray-500 hover:bg-gray-50'}`}
+                  title="3-stage: independent reviews → critique → chair"
+                >
+                  Council
+                </button>
+                <button
+                  onClick={() => setCouncilMode('debate')}
+                  className={`px-2 py-1.5 text-[10px] font-medium transition-colors
+                    ${councilMode === 'debate'
+                      ? 'bg-council-500 text-white'
+                      : 'bg-white text-gray-500 hover:bg-gray-50'}`}
+                  title="4-round: reviews → critique → revision → final critique → chair"
+                >
+                  Debate
+                </button>
+              </div>
+            )}
             <div className="flex-1" />
             <button
               onClick={onOpenSettings}

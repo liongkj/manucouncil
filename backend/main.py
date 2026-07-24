@@ -21,7 +21,7 @@ from backend.models import (
     PresetConfig,
     SessionInfo,
 )
-from backend.pipeline import run_council, run_council_streaming
+from backend.pipeline import run_council, run_council_streaming, run_council_debate
 from backend.presets import get_preset, list_presets
 from backend import storage
 
@@ -285,7 +285,8 @@ async def council_stream(req: CouncilRequest):
 
     async def event_generator() -> AsyncIterator[dict]:
         try:
-            async for ev in run_council_streaming(
+            pipeline = run_council_debate if req.mode == "debate" else run_council_streaming
+            async for ev in pipeline(
                 bridge=bridge,
                 preset_id=req.preset_id,
                 text=req.text,
@@ -312,14 +313,25 @@ async def council(req: CouncilRequest):
         raise HTTPException(404, str(e))
 
     try:
-        members, chair, critiques = await run_council(
-            bridge=bridge,
-            preset_id=req.preset_id,
-            text=req.text,
-            scratchpad=req.scratchpad,
-            model_overrides=req.model_overrides,
-            contract_overrides=req.contract_overrides,
-        )
+        if req.mode == "debate":
+            from backend.pipeline import run_council_debate_nonstream
+            members, chair, critiques = await run_council_debate_nonstream(
+                bridge=bridge,
+                preset_id=req.preset_id,
+                text=req.text,
+                scratchpad=req.scratchpad,
+                model_overrides=req.model_overrides,
+                contract_overrides=req.contract_overrides,
+            )
+        else:
+            members, chair, critiques = await run_council(
+                bridge=bridge,
+                preset_id=req.preset_id,
+                text=req.text,
+                scratchpad=req.scratchpad,
+                model_overrides=req.model_overrides,
+                contract_overrides=req.contract_overrides,
+            )
     except Exception as e:
         raise HTTPException(500, f"Council pipeline failed: {e}")
 

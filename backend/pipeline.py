@@ -86,10 +86,11 @@ async def _call_member(
     )
 
 
-def anonymize_and_shuffle(
+def _build_peer_pool(
     results: list[MemberResult],
-) -> list[tuple[str, str, str]]:
-    pool = [(r.member_id, r.role, r.analysis) for r in results]
+    exclude_id: str | None = None,
+) -> list[tuple[str, str]]:
+    pool = [(r.member_id, r.analysis) for r in results if r.member_id != exclude_id]
     random.shuffle(pool)
     return pool
 
@@ -97,17 +98,18 @@ def anonymize_and_shuffle(
 def _build_critique_prompt(
     member: PresetMember,
     text: str,
-    anonymized: list[tuple[str, str, str]],
+    peer_pool: list[tuple[str, str]],
     scratchpad: str | None = None,
 ) -> str:
+    labels = "ABCDEFGHIJ"
     responses_block = "\n\n".join(
-        f"=== Response {i+1} (by {role}) ===\n{analysis}"
-        for i, (_, role, analysis) in enumerate(anonymized)
+        f"=== Response {labels[i]} ===\n{analysis}"
+        for i, (_, analysis) in enumerate(peer_pool)
     )
     return f"""Role: {member.role}
 Contract: {member.contract}
 
-You are evaluating your PEERS' responses to the original text below. Do NOT evaluate your own response — you will only see other reviewers' answers.
+You are evaluating your PEERS' responses to the original text below. Your own response is NOT included.
 
 Original text:
 ---
@@ -132,10 +134,10 @@ async def _run_critique(
     bridge: OpenCodeBridge,
     member: PresetMember,
     text: str,
-    anonymized: list[tuple[str, str, str]],
+    peer_pool: list[tuple[str, str]],
     scratchpad: str | None = None,
 ) -> Critique:
-    prompt = _build_critique_prompt(member, text, anonymized, scratchpad)
+    prompt = _build_critique_prompt(member, text, peer_pool, scratchpad)
     async with bridge.session_context() as session:
         response = await bridge.send_message(
             session_id=session.id,
@@ -271,13 +273,15 @@ async def run_council(
     chair_result: ChairResult | None = None
 
     if not preset.skip_critique and len(member_results) >= 2:
-        anonymized = anonymize_and_shuffle(member_results)
         critique_tasks = []
         for m in members:
             if m.skip_in_critique:
                 continue
+            pool = _build_peer_pool(member_results, exclude_id=m.id)
+            if len(pool) < 1:
+                continue
             critique_tasks.append(
-                _run_critique(bridge, m, text, anonymized, scratchpad)
+                _run_critique(bridge, m, text, pool, scratchpad)
             )
         if critique_tasks:
             critiques_results: list[Critique | None] = []
@@ -440,30 +444,62 @@ async def run_council_streaming(
         }
 
     member_results: list[MemberResult] = []
-    previous: list[tuple[str, str, str]] = []
-    for m in members:
-        try:
-            utils_block = (previous if not preset.sequential else None)
-            full_text = ""
-            member_risks: list[str] = []
-            member_conf = 0.5
-            async for evt in _stream_member(bridge, m, text, scratchpad,
-                                             previous if preset.sequential else None):
-                etype = evt[0]
-                if etype == "chunk":
-                    full_text = evt[1]
-                    yield {"event": "member_text", "data": {"member_id": m.id, "text": full_text}}
-                elif etype == "done":
-                    full_text = evt[1]
-            result = MemberResult(
-                member_id=m.id, role=m.role, model=m.model,
-                analysis=full_text, recommendation=None, risks=[], confidence=0.5,
-            )
-            member_results.append(result)
-            previous.append((m.id, m.role, full_text))
-            yield _emit_member(m.role, full_text, [], 0.5, m.id, m.model.model_dump())
-        except Exception as e:
-            yield {"event": "member_error", "data": {"member_id": m.id, "role": m.role, "error": str(e)}}
+    if preset.sequential:
+        previous: list[tuple[str, str, str]] = []
+        for m in members:
+            try:
+                full_text = ""
+                async for evt in _stream_member(bridge, m, text, scratchpad, previous):
+                    if evt[0] == "chunk":
+                        full_text = evt[1]
+                        yield {"event": "member_text", "data": {"member_id": m.id, "text": full_text}}
+                result = MemberResult(
+                    member_id=m.id, role=m.role, model=m.model,
+                    analysis=full_text, recommendation=None, risks=[], confidence=0.5,
+                )
+                member_results.append(result)
+                previous.append((m.id, m.role, full_text))
+                yield _emit_member(m.role, full_text, [], 0.5, m.id, m.model.model_dump())
+            except Exception as e:
+                yield {"event": "member_error", "data": {"member_id": m.id, "role": m.role, "error": str(e)}}
+    else:
+        queue: asyncio.Queue = asyncio.Queue()
+        member_texts: dict[str, str] = {}
+        member_complete: dict[str, bool] = {}
+
+        async def run_one(member: PresetMember):
+            try:
+                async for evt in _stream_member(bridge, member, text, scratchpad):
+                    if evt[0] == "chunk":
+                        await queue.put(("text", member.id, evt[1]))
+                    elif evt[0] == "done":
+                        await queue.put(("done", member.id, evt[1]))
+            except Exception as e:
+                await queue.put(("error", member.id, str(e)))
+
+        tasks = [asyncio.create_task(run_one(m)) for m in members]
+
+        while len(member_complete) < len(members):
+            evt_type, mid, val = await queue.get()
+            if evt_type == "text":
+                member_texts[mid] = val
+                yield {"event": "member_text", "data": {"member_id": mid, "text": val}}
+            elif evt_type == "done":
+                member_complete[mid] = True
+                member_texts[mid] = val
+                m = next(m for m in members if m.id == mid)
+                result = MemberResult(
+                    member_id=mid, role=m.role, model=m.model,
+                    analysis=val, recommendation=None, risks=[], confidence=0.5,
+                )
+                member_results.append(result)
+                yield _emit_member(m.role, val, [], 0.5, mid, m.model.model_dump())
+            elif evt_type == "error":
+                member_complete[mid] = True
+                yield {"event": "member_error", "data": {"member_id": mid, "error": val}}
+
+        for t in tasks:
+            t.cancel()
 
     yield {"event": "stage", "data": {"stage": "members", "status": "complete", "total": len(member_results)}}
 
@@ -475,12 +511,14 @@ async def run_council_streaming(
     if not preset.skip_critique and len(member_results) >= 2:
         yield {"event": "stage", "data": {"stage": "critiques", "status": "starting", "total": len(members)}}
 
-        anonymized = anonymize_and_shuffle(member_results)
         critique_tasks: dict[asyncio.Task, PresetMember] = {}
         for m in members:
             if m.skip_in_critique:
                 continue
-            t = asyncio.create_task(_run_critique(bridge, m, text, anonymized, scratchpad))
+            pool = _build_peer_pool(member_results, exclude_id=m.id)
+            if len(pool) < 1:
+                continue
+            t = asyncio.create_task(_run_critique(bridge, m, text, pool, scratchpad))
             critique_tasks[t] = m
 
         pending = set(critique_tasks.keys())
@@ -527,3 +565,260 @@ async def run_council_streaming(
 
     yield {"event": "stage", "data": {"stage": "chair", "status": "complete"}}
     yield {"event": "done", "data": {"member_count": len(member_results), "critique_count": len(critiques)}}
+
+
+def _build_revision_prompt(
+    member: PresetMember,
+    text: str,
+    own_review: str,
+    all_member_results: list[MemberResult],
+    critiques: list[Critique],
+    scratchpad: str | None = None,
+) -> str:
+    others_block = "\n\n".join(
+        f"=== {r.role} ({r.member_id}) ===\n{r.analysis}"
+        for r in all_member_results if r.member_id != member.id
+    )
+    critiques_of_self = [
+        c for c in critiques if c.reviewer_id != member.id
+    ]
+    critiques_block = "\n\n".join(
+        f"=== Critique by reviewer of {member.role} ===\n" + "\n".join(c.disagreements)
+        for c in critiques_of_self
+    )
+    scratchpad_block = f"\n\nCouncil Scratchpad Notes:\n{scratchpad}" if scratchpad else ""
+    return f"""You are {member.role} in a research writing council. You previously wrote the following analysis:
+
+Original text:
+---
+{text}
+---
+
+Your original analysis:
+---
+{own_review}
+---
+
+Other council members' analyses:
+{others_block}
+
+Peer critiques directed at your analysis:
+{critiques_block}
+{scratchpad_block}
+
+Now, based on the other members' perspectives and the critiques received, produce a REVISED analysis.
+- You may change your mind, refine your reasoning, or defend your original position
+- Respond to the critiques explicitly
+- Update your risks, confidence, and recommendations as needed
+- Write in natural prose
+
+Your revised analysis:"""
+
+
+async def _call_member_revision(
+    bridge: OpenCodeBridge,
+    member: PresetMember,
+    text: str,
+    own_review: str,
+    all_member_results: list[MemberResult],
+    critiques: list[Critique],
+    scratchpad: str | None = None,
+) -> MemberResult:
+    system = f"Role: {member.role}\n\n{member.contract}\n\nYou are participating in a multi-round debate. Revise your analysis based on peer feedback."
+    prompt = _build_revision_prompt(member, text, own_review, all_member_results, critiques, scratchpad)
+    async with bridge.session_context() as session:
+        response = await bridge.send_message(
+            session_id=session.id,
+            model=member.model,
+            system=system,
+            parts=[{"type": "text", "text": prompt}],
+            tools={},
+        )
+    return MemberResult(
+        member_id=member.id,
+        role=member.role,
+        model=member.model,
+        analysis=_clean_response(response),
+        recommendation=None,
+        risks=[],
+        confidence=0.5,
+    )
+
+
+async def run_council_debate(
+    bridge: OpenCodeBridge,
+    preset_id: str,
+    text: str,
+    scratchpad: str | None = None,
+    model_overrides: dict[str, ModelRef] | None = None,
+    contract_overrides: dict[str, str] | None = None,
+) -> AsyncIterator[dict]:
+    preset = get_preset(preset_id)
+    model_over = model_overrides or {}
+    contract_over = contract_overrides or {}
+
+    members = [
+        PresetMember(
+            id=m.id,
+            role=m.role,
+            model=model_over.get(m.id, m.model),
+            contract=contract_over.get(m.id, m.contract),
+            skip_in_critique=m.skip_in_critique,
+        )
+        for m in preset.members
+    ]
+
+    if preset.skip_chair or preset.skip_critique:
+        yield {"event": "error", "data": "Debate mode requires critiques and chair"}
+        return
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "round_1_reviews", "round": 1, "total": 4}}
+
+    # Round 1: Independent reviews
+    member_results: list[MemberResult] = []
+    if preset.sequential:
+        previous: list[tuple[str, str, str]] = []
+        for m in members:
+            try:
+                result = await _call_member(bridge, m, text, scratchpad, previous)
+                member_results.append(result)
+                previous.append((m.id, m.role, result.analysis))
+                yield {"event": "member_done", "data": {
+                    "member_id": m.id, "role": m.role, "analysis": result.analysis,
+                    "risks": [], "confidence": 0.5, "model": m.model.model_dump(), "round": 1,
+                }}
+            except Exception as e:
+                yield {"event": "member_error", "data": {"member_id": m.id, "role": m.role, "error": str(e), "round": 1}}
+    else:
+        tasks = [_call_member(bridge, m, text, scratchpad) for m in members]
+        for coro in asyncio.as_completed(tasks):
+            try:
+                result = await coro
+                member_results.append(result)
+                yield {"event": "member_done", "data": {
+                    "member_id": result.member_id, "role": result.role, "analysis": result.analysis,
+                    "risks": [], "confidence": 0.5, "model": result.model.model_dump(), "round": 1,
+                }}
+            except Exception as e:
+                pass
+
+    if len(member_results) < 2:
+        yield {"event": "error", "data": "Quorum not met"}
+        return
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "round_2_critique", "round": 2, "total": 4}}
+
+    # Round 2: Critique
+    critiques: list[Critique] = []
+    c2_tasks = []
+    for m in members:
+        if m.skip_in_critique:
+            continue
+        pool = _build_peer_pool(member_results, exclude_id=m.id)
+        if len(pool) < 1:
+            continue
+        c2_tasks.append(_run_critique(bridge, m, text, pool, scratchpad))
+    for coro in asyncio.as_completed(c2_tasks):
+        try:
+            c = await coro
+            critiques.append(c)
+            yield {"event": "critique_done", "data": {"reviewer_id": c.reviewer_id, "disagreements": c.disagreements, "round": 2}}
+        except Exception:
+            pass
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "round_3_revision", "round": 3, "total": 4}}
+
+    # Round 3: Revision - each member revises their own review
+    revised: list[MemberResult] = []
+    revision_tasks = [
+        _call_member_revision(bridge, m, text, result.analysis, member_results, critiques, scratchpad)
+        for m, result in zip(members, member_results)
+        if result.member_id == m.id
+    ]
+    for coro in asyncio.as_completed(revision_tasks):
+        try:
+            r = await coro
+            revised.append(r)
+            yield {"event": "member_revision", "data": {
+                "member_id": r.member_id, "role": r.role, "analysis": r.analysis,
+                "model": r.model.model_dump(), "round": 3,
+            }}
+        except Exception as e:
+            yield {"event": "member_error", "data": {"member_id": m.id, "role": m.role, "error": str(e), "round": 3}}
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "round_4_final_critique", "round": 4, "total": 4}}
+
+    # Round 4: Critique of revised reviews
+    final_critiques: list[Critique] = []
+    fc_tasks = []
+    for m in members:
+        if m.skip_in_critique:
+            continue
+        pool = _build_peer_pool(revised, exclude_id=m.id)
+        if len(pool) < 1:
+            continue
+        fc_tasks.append(_run_critique(bridge, m, text, pool, scratchpad))
+    for coro in asyncio.as_completed(fc_tasks):
+        try:
+            c = await coro
+            final_critiques.append(c)
+            yield {"event": "critique_done", "data": {"reviewer_id": c.reviewer_id, "disagreements": c.disagreements, "round": 4}}
+        except Exception:
+            pass
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "chair_starting", "round": 5, "total": 4}}
+
+    # Chair synthesis
+    if preset.chair:
+        all_reviews = member_results + revised
+        all_critiques = critiques + final_critiques
+        try:
+            chair_prompt = _build_chair_prompt(preset, text, all_reviews, all_critiques, scratchpad)
+            async with bridge.session_context() as session:
+                chair_text = await bridge.send_message(
+                    session_id=session.id,
+                    model=preset.chair.model,
+                    system="You are the Chair of a research writing council debate. Synthesize all rounds.",
+                    parts=[{"type": "text", "text": chair_prompt}],
+                    tools={},
+                )
+            parsed = _parse_chair_json(chair_text)
+            chair_result = ChairResult(
+                verdict=parsed.get("verdict", ""),
+                consensus=parsed.get("consensus", []),
+                disagreements=parsed.get("disagreements", []),
+                scientific_risks=parsed.get("scientific_risks", []),
+                recommended_text=parsed.get("recommended_text"),
+                rationale=parsed.get("rationale", chair_text),
+            )
+            yield {"event": "chair_done", "data": chair_result.model_dump()}
+        except Exception as e:
+            yield {"event": "chair_error", "data": str(e)}
+
+    yield {"event": "stage", "data": {"stage": "debate", "status": "complete", "round": 5, "total": 4}}
+    yield {"event": "done", "data": {"member_count": len(member_results), "critique_count": len(critiques), "mode": "debate"}}
+
+
+async def run_council_debate_nonstream(
+    bridge: OpenCodeBridge,
+    preset_id: str,
+    text: str,
+    scratchpad: str | None = None,
+    model_overrides: dict[str, ModelRef] | None = None,
+    contract_overrides: dict[str, str] | None = None,
+) -> tuple[list[MemberResult], ChairResult | None, list[Critique] | None]:
+    members_list: list[MemberResult] = []
+    chair_out: ChairResult | None = None
+    critiques_out: list[Critique] = []
+
+    async for ev in run_council_debate(bridge, preset_id, text, scratchpad, model_overrides, contract_overrides):
+        if ev["event"] == "member_done":
+            members_list.append(MemberResult(**ev["data"]))
+        elif ev["event"] == "member_revision":
+            members_list.append(MemberResult(**ev["data"]))
+        elif ev["event"] == "critique_done":
+            critiques_out.append(Critique(**ev["data"]))
+        elif ev["event"] == "chair_done":
+            chair_out = ChairResult(**ev["data"])
+
+    return members_list, chair_out, critiques_out if critiques_out else None

@@ -49,6 +49,7 @@ class CouncilRequest(BaseModel):
     text: str
     preset_id: str
     scratchpad: str | None = None
+    mode: Literal["council", "debate"] = "council"
     model_overrides: dict[str, ModelRef] | None = None
     contract_overrides: dict[str, str] | None = None
 

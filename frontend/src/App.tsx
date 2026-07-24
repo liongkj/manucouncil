@@ -152,17 +152,17 @@ export default function App() {
     }
   }, [])
 
-  const handleCouncil = useCallback(async (text: string, presetId: string, scratchpad: string) => {
+  const handleCouncil = useCallback(async (text: string, presetId: string, scratchpad: string, councilMode: string) => {
     const preset = presets.find(p => p.id === presetId)
     const overrides = settings.modelOverrides[presetId]
-        const contractOverrides = settings.customContracts[presetId]
-        const body: Record<string, unknown> = { text, preset_id: presetId, scratchpad }
-        if (overrides && Object.keys(overrides).length > 0) {
-          body.model_overrides = overrides
-        }
-        if (contractOverrides && Object.keys(contractOverrides).length > 0) {
-          body.contract_overrides = contractOverrides
-        }
+    const contractOverrides = settings.customContracts[presetId]
+    const body: Record<string, unknown> = { text, preset_id: presetId, scratchpad, mode: councilMode }
+    if (overrides && Object.keys(overrides).length > 0) {
+      body.model_overrides = overrides
+    }
+    if (contractOverrides && Object.keys(contractOverrides).length > 0) {
+      body.contract_overrides = contractOverrides
+    }
 
     setCouncilProgress({ preset_id: presetId, text, chair: null, members: [], critiques: [] })
 
@@ -210,13 +210,14 @@ export default function App() {
     model: ModelRef,
     presetId: string,
     scratchpad: string,
+    councilMode: string = 'council',
   ) => {
     setLoading(true)
     try {
       if (mode === 'single') {
         await handleSingleModel(text, model)
       } else {
-        await handleCouncil(text, presetId, scratchpad)
+        await handleCouncil(text, presetId, scratchpad, councilMode)
       }
     } catch (err) {
       setMessages(prev => [...prev, {

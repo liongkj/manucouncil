@@ -76,5 +76,8 @@ def _write_session(session: dict) -> None:
             json.dump(session, f, indent=2)
         os.replace(tmp, path)
     except BaseException:
-        os.unlink(tmp, exist_ok=True)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
         raise
