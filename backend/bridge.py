@@ -7,8 +7,9 @@ from contextlib import asynccontextmanager
 import httpx
 from httpx import BasicAuth, HTTPError, Timeout
 
-from backend.models import ModelRef
 from backend import debug_log
+from backend.config import env
+from backend.models import ModelRef
 
 
 class BridgeError(Exception):
@@ -25,12 +26,18 @@ class Session:
 
 
 class OpenCodeBridge:
-    def __init__(self, base_url: str, password: str | None = None):
+    def __init__(self, base_url: str, password: str | None = None, username: str | None = None):
         self.base_url = base_url.rstrip("/")
-        self._auth = BasicAuth("opencode", password) if password else None
+        username = username or env.opencode.auth_username
+        self._auth = BasicAuth(username, password) if password else None
+        bc = env.bridge
         self._client = httpx.AsyncClient(
             auth=self._auth,
-            timeout=Timeout(600.0, read=600.0, connect=30.0),
+            timeout=Timeout(
+                bc.timeout_total,
+                read=bc.timeout_read,
+                connect=bc.timeout_connect,
+            ),
         )
 
     async def close(self) -> None:
@@ -79,9 +86,11 @@ class OpenCodeBridge:
         system: str,
         parts: list[dict],
         tools: dict | None = None,
-        retries: int = 1,
+        retries: int | None = None,
         log_session_id: str | None = None,
     ) -> str:
+        if retries is None:
+            retries = env.bridge.retries
         last_error: Exception | None = None
         payload = self._build_message_payload(model, system, parts, tools)
         user_text = next((p["text"] for p in parts if p.get("type") == "text"), "")
@@ -114,7 +123,7 @@ class OpenCodeBridge:
             except HTTPError as e:
                 last_error = e
                 if attempt < retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(env.bridge.retry_backoff_factor ** attempt)
                     continue
                 elapsed = time.time() - start
                 if log_session_id:

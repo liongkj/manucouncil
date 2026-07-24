@@ -1,7 +1,5 @@
 import asyncio
 import json
-import os
-import signal
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -24,6 +22,7 @@ from backend.models import (
 from backend.pipeline import run_council, run_council_streaming, run_council_debate, run_council_debate_streaming
 from backend.presets import get_preset, list_presets
 from backend import debug_log, storage
+from backend.config import env
 
 
 bridge: OpenCodeBridge | None = None
@@ -31,9 +30,8 @@ opencode_process: asyncio.subprocess.Process | None = None
 _launched_manually = False
 
 
-OPENCODE_PORT = int(os.environ.get("OPENCODE_PORT", "4096"))
-OPENCODE_BASE = f"http://localhost:{OPENCODE_PORT}"
-OPENCODE_PASSWORD = os.environ.get("OPENCODE_SERVER_PASSWORD", None)
+OPENCODE_BASE = env.opencode.base_url
+OPENCODE_PASSWORD = env.opencode.password
 
 
 async def _find_running_server() -> bool:
@@ -49,7 +47,8 @@ async def _find_running_server() -> bool:
 
 async def _launch_opencode() -> asyncio.subprocess.Process | None:
     global opencode_process
-    cmd = ["opencode", "serve", "--port", str(OPENCODE_PORT)]
+    oc = env.opencode
+    cmd = ["opencode", "serve", "--port", str(oc.port)]
     if OPENCODE_PASSWORD:
         cmd.extend(["--password", OPENCODE_PASSWORD])
     proc = await asyncio.create_subprocess_exec(
@@ -57,7 +56,7 @@ async def _launch_opencode() -> asyncio.subprocess.Process | None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    for _ in range(30):
+    for _ in range(oc.launch_timeout):
         await asyncio.sleep(1)
         try:
             r = await bridge.health()
@@ -67,10 +66,12 @@ async def _launch_opencode() -> asyncio.subprocess.Process | None:
             continue
     proc.kill()
     await proc.wait()
-    raise RuntimeError("opencode serve failed to start within 30 seconds")
+    raise RuntimeError(f"opencode serve failed to start within {oc.launch_timeout} seconds")
 
 
-async def _wait_for_server(proc: asyncio.subprocess.Process, timeout: int = 30):
+async def _wait_for_server(proc: asyncio.subprocess.Process, timeout: int | None = None):
+    oc = env.opencode
+    timeout = timeout or oc.health_timeout
     for _ in range(timeout):
         await asyncio.sleep(1)
         try:
@@ -103,7 +104,7 @@ async def lifespan(app: FastAPI):
     if _launched_manually and opencode_process:
         opencode_process.terminate()
         try:
-            await asyncio.wait_for(opencode_process.wait(), timeout=10)
+            await asyncio.wait_for(opencode_process.wait(), timeout=env.opencode.shutdown_wait)
         except asyncio.TimeoutError:
             opencode_process.kill()
             await opencode_process.wait()
@@ -112,17 +113,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Research Writing Council",
-    version="0.1.0",
+    title=env.server.title,
+    version=env.server.version,
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=env.cors.allow_origins,
+    allow_credentials=env.cors.allow_credentials,
+    allow_methods=env.cors.allow_methods,
+    allow_headers=env.cors.allow_headers,
 )
 
 
@@ -136,7 +137,6 @@ async def health():
 
 _models_cache: list[dict] | None = None
 _models_cache_ts: float = 0
-_MODELS_CACHE_TTL = 60
 
 
 def _resolve_session(req: ChatRequest | CouncilRequest) -> str:
@@ -159,7 +159,7 @@ def _preset_label(preset_id: str) -> str:
 async def list_models():
     global _models_cache, _models_cache_ts
     now = time.time()
-    if _models_cache is not None and (now - _models_cache_ts) < _MODELS_CACHE_TTL:
+    if _models_cache is not None and (now - _models_cache_ts) < env.opencode.models_cache_ttl:
         return _models_cache
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -167,7 +167,7 @@ async def list_models():
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=env.opencode.models_timeout)
         raw = stdout.decode().strip()
         models = []
         seen = set()

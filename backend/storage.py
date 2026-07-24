@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-STORAGE_DIR = Path(__file__).parent.parent / "data" / "sessions"
+from backend.config import env
+
+STORAGE_DIR = env.resolve_storage_dir()
 
 
 def _ensure_dir() -> Path:
