@@ -1,6 +1,7 @@
 import asyncio
 import json
 import random
+import re
 from collections.abc import AsyncIterator
 
 from backend import debug_log
@@ -22,19 +23,99 @@ class PipelineError(Exception):
 
 
 def _clean_response(text: str) -> str:
-    import re
     text = re.sub(r"^```(?:json)?\s*\n?", "", text, flags=re.MULTILINE)
     text = re.sub(r"\n?\s*```$", "", text, flags=re.MULTILINE)
     text = text.strip()
     return text
 
 
-def _build_system_prompt(role: str, contract: str) -> str:
+def _build_system_prompt(role: str, contract: str, output_format: str | None = None) -> str:
+    fmt = output_format if output_format is not None else env.pipeline.prompts.member_output_format
     return f"""Role: {role}
 
-{contract}
+{contract}{fmt}"""
 
-Respond with natural prose. Do NOT use JSON or markdown code fences. Write in clear paragraph form. Include your analysis, key findings, risks, and recommendation in plain text."""
+
+_SECTION_RE = re.compile(
+    r"^\s*(?:[*_#\s]*)(THINKING|ANALYSIS|RECOMMENDATION|RISKS|CONFIDENCE)"
+    r"(?:[*_\s]*):\s*",
+    re.IGNORECASE | re.MULTILINE,
+)
+_CONFIDENCE_RE = re.compile(r"(\d*\.?\d+)\s*%?")
+_RECOMMENDATION_RE = re.compile(r"\b(keep|revise|flag)\b", re.IGNORECASE)
+
+
+def _split_sections(text: str) -> dict[str, str]:
+    """Split a member response on the five headings, tolerating stray markdown."""
+    matches = list(_SECTION_RE.finditer(text))
+    if not matches:
+        return {}
+    out: dict[str, str] = {}
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        out[m.group(1).upper()] = text[m.end() : end].strip()
+    return out
+
+
+def _parse_risks(block: str) -> list[str]:
+    risks: list[str] = []
+    for raw in block.splitlines():
+        line = raw.strip().lstrip("-*•").strip()
+        if not line:
+            continue
+        if line.lower() in {"none", "none.", "n/a", "no risks", "no risks."}:
+            return []
+        risks.append(line)
+    return risks
+
+
+def _parse_member_response(text: str) -> dict:
+    """Pull structure out of a member response.
+
+    Models drift, so every field degrades independently: a response with no
+    recognisable headings still yields its full text as the analysis.
+    """
+    cleaned = _clean_response(text)
+    sections = _split_sections(cleaned)
+
+    if not sections:
+        return {
+            "thinking": "",
+            "analysis": cleaned,
+            "recommendation": None,
+            "risks": [],
+            "confidence": DEFAULT_CONFIDENCE,
+        }
+
+    confidence = DEFAULT_CONFIDENCE
+    if raw_conf := sections.get("CONFIDENCE", ""):
+        if m := _CONFIDENCE_RE.search(raw_conf):
+            try:
+                val = float(m.group(1))
+                # Accept "85%" and "85" as 0.85, but keep a bare 0.85 as-is.
+                if val > 1.0:
+                    val = val / 100.0
+                confidence = min(max(val, 0.0), 1.0)
+            except ValueError:
+                pass
+
+    recommendation = None
+    if raw_rec := sections.get("RECOMMENDATION", ""):
+        m = _RECOMMENDATION_RE.search(raw_rec)
+        recommendation = m.group(1).lower() if m else raw_rec.splitlines()[0].strip() or None
+
+    analysis = sections.get("ANALYSIS", "").strip()
+    if not analysis:
+        # Heading drift: keep everything that isn't the reasoning block.
+        analysis = cleaned
+
+    return {
+        "thinking": sections.get("THINKING", "").strip(),
+        "analysis": analysis,
+        "recommendation": recommendation,
+        "risks": _parse_risks(sections.get("RISKS", "")),
+        "confidence": confidence,
+    }
 
 
 CHAIN_OF_THOUGHT_KICKER = env.pipeline.chain_of_thought_kicker
@@ -70,7 +151,7 @@ async def _call_member(
     previous_results: list[tuple[str, str, str]] | None = None,
     log_session_id: str | None = None,
 ) -> MemberResult:
-    system = _build_system_prompt(member.role, member.contract) + CHAIN_OF_THOUGHT_KICKER
+    system = _build_system_prompt(member.role, member.contract, member.output_format)
     user_text = _build_user_text(text, scratchpad, previous_results)
     async with bridge.session_context() as session:
         response = await bridge.send_message(
@@ -81,15 +162,35 @@ async def _call_member(
             tools={},
             log_session_id=log_session_id,
         )
+    return _member_result_from_text(member.id, member.role, member.model, response)
+
+
+def _member_result_from_text(
+    member_id: str,
+    role: str,
+    model: ModelRef,
+    raw: str,
+    round: int | None = None,
+) -> MemberResult:
+    """Build a MemberResult from a raw model response, parsing out the structure."""
+    p = _parse_member_response(raw)
     return MemberResult(
-        member_id=member.id,
-        role=member.role,
-        model=member.model,
-        analysis=_clean_response(response),
-        recommendation=None,
-        risks=[],
-        confidence=DEFAULT_CONFIDENCE,
+        member_id=member_id,
+        role=role,
+        model=model,
+        analysis=p["analysis"],
+        recommendation=p["recommendation"],
+        risks=p["risks"],
+        confidence=p["confidence"],
+        round=round,
     )
+
+
+def _member_done_payload(result: MemberResult) -> dict:
+    data = result.model_dump()
+    if result.round is None:
+        data.pop("round", None)
+    return data
 
 
 def _build_peer_pool(
@@ -447,7 +548,7 @@ async def _stream_member(
     previous_results: list[tuple[str, str, str]] | None = None,
     log_session_id: str | None = None,
 ) -> AsyncIterator[tuple[str, list[str], float]]:
-    system = _build_system_prompt(member.role, member.contract) + CHAIN_OF_THOUGHT_KICKER
+    system = _build_system_prompt(member.role, member.contract, member.output_format)
     user_text = _build_user_text(text, scratchpad, previous_results)
 
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -524,6 +625,31 @@ async def _stream_member(
         await session.delete()
 
 
+def _roster_event(members: list[PresetMember], preset, mode: str) -> dict:
+    """Announce every seat before any text streams, so the UI can lay out the
+    table up front instead of growing it one member at a time."""
+    return {
+        "event": "roster",
+        "data": {
+            "mode": mode,
+            "preset_id": preset.id,
+            "preset_label": preset.label,
+            "has_chair": bool(preset.chair) and not preset.skip_chair,
+            "has_critique": not preset.skip_critique,
+            "sequential": preset.sequential,
+            "members": [
+                {
+                    "member_id": m.id,
+                    "role": m.role,
+                    "model": m.model.model_dump(),
+                    "skip_in_critique": m.skip_in_critique,
+                }
+                for m in members
+            ],
+        },
+    }
+
+
 async def run_council_streaming(
     bridge: OpenCodeBridge,
     preset_id: str,
@@ -548,20 +674,8 @@ async def run_council_streaming(
         for m in preset.members
     ]
 
+    yield _roster_event(members, preset, "council")
     yield {"event": "stage", "data": {"stage": "members", "status": "starting", "total": len(members)}}
-
-    def _emit_member(role, analysis, risks, confidence, mid, model_dict):
-        return {
-            "event": "member_done",
-            "data": {
-                "member_id": mid,
-                "role": role,
-                "analysis": analysis,
-                "risks": risks,
-                "confidence": confidence,
-                "model": model_dict,
-            },
-        }
 
     member_results: list[MemberResult] = []
     if preset.sequential:
@@ -572,14 +686,11 @@ async def run_council_streaming(
                 async for evt in _stream_member(bridge, m, text, scratchpad, previous, log_session_id):
                     if evt[0] == "chunk":
                         full_text = evt[1]
-                        yield {"event": "member_text", "data": {"member_id": m.id, "text": full_text}}
-                result = MemberResult(
-                    member_id=m.id, role=m.role, model=m.model,
-                    analysis=full_text, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE,
-                )
+                        yield {"event": "member_text", "data": {"member_id": m.id, "role": m.role, "text": full_text}}
+                result = _member_result_from_text(m.id, m.role, m.model, full_text)
                 member_results.append(result)
-                previous.append((m.id, m.role, full_text))
-                yield _emit_member(m.role, full_text, [], 0.5, m.id, m.model.model_dump())
+                previous.append((m.id, m.role, result.analysis))
+                yield {"event": "member_done", "data": _member_done_payload(result)}
             except Exception as e:
                 yield {"event": "member_error", "data": {"member_id": m.id, "role": m.role, "error": str(e)}}
     else:
@@ -603,17 +714,15 @@ async def run_council_streaming(
             evt_type, mid, val = await queue.get()
             if evt_type == "text":
                 member_texts[mid] = val
-                yield {"event": "member_text", "data": {"member_id": mid, "text": val}}
+                role = next((m.role for m in members if m.id == mid), "")
+                yield {"event": "member_text", "data": {"member_id": mid, "role": role, "text": val}}
             elif evt_type == "done":
                 member_complete[mid] = True
                 member_texts[mid] = val
                 m = next(m for m in members if m.id == mid)
-                result = MemberResult(
-                    member_id=mid, role=m.role, model=m.model,
-                    analysis=val, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE,
-                )
+                result = _member_result_from_text(mid, m.role, m.model, val)
                 member_results.append(result)
-                yield _emit_member(m.role, val, [], 0.5, mid, m.model.model_dump())
+                yield {"event": "member_done", "data": _member_done_payload(result)}
             elif evt_type == "error":
                 member_complete[mid] = True
                 yield {"event": "member_error", "data": {"member_id": mid, "error": val}}
@@ -649,7 +758,7 @@ async def run_council_streaming(
                 try:
                     c = task.result()
                     critiques.append(c)
-                    yield {"event": "critique_done", "data": {"reviewer_id": c.reviewer_id, "rankings": c.rankings, "strongest_points": c.strongest_points, "weaknesses": c.weaknesses, "disagreements": c.disagreements}}
+                    yield {"event": "critique_done", "data": c.model_dump()}
                 except Exception as e:
                     yield {"event": "critique_error", "data": {"reviewer_id": m.id, "role": m.role, "error": str(e)}}
 
@@ -774,15 +883,7 @@ async def _call_member_revision(
             tools={},
             log_session_id=log_session_id,
         )
-    return MemberResult(
-        member_id=member.id,
-        role=member.role,
-        model=member.model,
-        analysis=_clean_response(response),
-        recommendation=None,
-        risks=[],
-        confidence=DEFAULT_CONFIDENCE,
-    )
+    return _member_result_from_text(member.id, member.role, member.model, response)
 
 
 async def run_council_debate(
@@ -863,7 +964,7 @@ async def run_council_debate(
         try:
             c = await coro
             critiques.append(c)
-            yield {"event": "critique_done", "data": {"reviewer_id": c.reviewer_id, "disagreements": c.disagreements, "round": 2}}
+            yield {"event": "critique_done", "data": {**c.model_dump(), "round": 2}}
         except Exception:
             pass
 
@@ -903,7 +1004,7 @@ async def run_council_debate(
         try:
             c = await coro
             final_critiques.append(c)
-            yield {"event": "critique_done", "data": {"reviewer_id": c.reviewer_id, "disagreements": c.disagreements, "round": 4}}
+            yield {"event": "critique_done", "data": {**c.model_dump(), "round": 4}}
         except Exception:
             pass
 
@@ -1068,6 +1169,7 @@ async def run_council_debate_streaming(
         yield {"event": "error", "data": "Debate mode requires critiques and chair"}
         return
 
+    yield _roster_event(members, preset, "debate")
     yield {"event": "stage", "data": {"stage": "debate", "status": "round_1_reviews", "round": 1, "total": 4}}
 
     # Round 1: Independent reviews (streaming)
@@ -1080,17 +1182,11 @@ async def run_council_debate_streaming(
                 async for evt in _stream_member(bridge, m, text, scratchpad, previous, log_session_id):
                     if evt[0] == "chunk":
                         full_text = evt[1]
-                        yield {"event": "member_text", "data": {"member_id": m.id, "text": full_text, "round": 1}}
-                result = MemberResult(
-                    member_id=m.id, role=m.role, model=m.model,
-                    analysis=full_text, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE, round=1,
-                )
+                        yield {"event": "member_text", "data": {"member_id": m.id, "role": m.role, "text": full_text, "round": 1}}
+                result = _member_result_from_text(m.id, m.role, m.model, full_text, round=1)
                 member_results.append(result)
-                previous.append((m.id, m.role, full_text))
-                yield {"event": "member_done", "data": {
-                    "member_id": m.id, "role": m.role, "analysis": full_text,
-                    "risks": [], "confidence": 0.5, "model": m.model.model_dump(), "round": 1,
-                }}
+                previous.append((m.id, m.role, result.analysis))
+                yield {"event": "member_done", "data": _member_done_payload(result)}
             except Exception as e:
                 yield {"event": "member_error", "data": {"member_id": m.id, "role": m.role, "error": str(e), "round": 1}}
     else:
@@ -1114,20 +1210,15 @@ async def run_council_debate_streaming(
             evt_type, mid, val = await queue.get()
             if evt_type == "text":
                 member_texts[mid] = val
-                yield {"event": "member_text", "data": {"member_id": mid, "text": val, "round": 1}}
+                role = next((m.role for m in members if m.id == mid), "")
+                yield {"event": "member_text", "data": {"member_id": mid, "role": role, "text": val, "round": 1}}
             elif evt_type == "done":
                 member_complete[mid] = True
                 member_texts[mid] = val
                 m = next(m for m in members if m.id == mid)
-                result = MemberResult(
-                    member_id=mid, role=m.role, model=m.model,
-                    analysis=val, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE, round=1,
-                )
+                result = _member_result_from_text(mid, m.role, m.model, val, round=1)
                 member_results.append(result)
-                yield {"event": "member_done", "data": {
-                    "member_id": mid, "role": m.role, "analysis": val,
-                    "risks": [], "confidence": 0.5, "model": m.model.model_dump(), "round": 1,
-                }}
+                yield {"event": "member_done", "data": _member_done_payload(result)}
             elif evt_type == "error":
                 member_complete[mid] = True
                 yield {"event": "member_error", "data": {"member_id": mid, "error": val, "round": 1}}
@@ -1155,7 +1246,7 @@ async def run_council_debate_streaming(
         try:
             c = await coro
             critiques.append(c)
-            yield {"event": "critique_done", "data": {"reviewer_id": c.reviewer_id, "disagreements": c.disagreements, "round": 2}}
+            yield {"event": "critique_done", "data": {**c.model_dump(), "round": 2}}
         except Exception:
             pass
 
@@ -1174,19 +1265,13 @@ async def run_council_debate_streaming(
             async for evt in coro:
                 if evt[0] == "chunk":
                     full_text = evt[1]
-                    yield {"event": "member_revision_text", "data": {"member_id": m.id, "text": full_text, "round": 3}}
+                    yield {"event": "member_revision_text", "data": {"member_id": m.id, "role": m.role, "text": full_text, "round": 3}}
                 elif evt[0] == "done":
                     full_text = evt[1]
             m = next(m for m in members if m.id == mid)
-            result = MemberResult(
-                member_id=m.id, role=m.role, model=m.model,
-                analysis=full_text, recommendation=None, risks=[], confidence=DEFAULT_CONFIDENCE, round=3,
-            )
+            result = _member_result_from_text(m.id, m.role, m.model, full_text, round=3)
             revised.append(result)
-            yield {"event": "member_revision", "data": {
-                "member_id": m.id, "role": m.role, "analysis": full_text,
-                "model": m.model.model_dump(), "round": 3,
-            }}
+            yield {"event": "member_revision", "data": _member_done_payload(result)}
         except Exception as e:
             yield {"event": "member_error", "data": {"member_id": m.id, "role": m.role, "error": str(e), "round": 3}}
 
@@ -1206,7 +1291,7 @@ async def run_council_debate_streaming(
         try:
             c = await coro
             final_critiques.append(c)
-            yield {"event": "critique_done", "data": {"reviewer_id": c.reviewer_id, "disagreements": c.disagreements, "round": 4}}
+            yield {"event": "critique_done", "data": {**c.model_dump(), "round": 4}}
         except Exception:
             pass
 

@@ -13,6 +13,9 @@ class PresetMember(BaseModel):
     model: ModelRef
     contract: str
     skip_in_critique: bool = False
+    # Overrides the shared five-heading response format. Needed by members whose
+    # deliverable is rewritten text rather than an analysis.
+    output_format: str | None = None
 
 
 class PresetChair(BaseModel):
