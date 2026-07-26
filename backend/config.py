@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -59,6 +59,24 @@ class BridgeClientConfig:
 
 @dataclass(frozen=True)
 class PipelinePromptsConfig:
+    member_output_format: str = (
+        "\n\nWork through the text before answering, then reply in EXACTLY "
+        "this format:\n\n"
+        "THINKING:\n"
+        "Your working notes. Terse fragments are fine.\n\n"
+        "ANALYSIS:\n"
+        "Your findings as prose. Maximum 150 words. Lead with the most "
+        "serious issue. Quote the exact phrase you are objecting to. "
+        "No preamble, no restating the task.\n\n"
+        "RECOMMENDATION: keep OR revise OR flag\n\n"
+        "RISKS:\n"
+        "- One risk per line, each a concrete consequence of publishing "
+        "as-is.\n"
+        '- Write "none" if there are none.\n\n'
+        "CONFIDENCE: a single number between 0.0 and 1.0\n\n"
+        "Use those five headings verbatim, in that order, each on its own "
+        "line. No markdown bold, no code fences."
+    )
     critique_system: str = (
         "You are a peer reviewer evaluating other reviewers. "
         "Be critical and specific. Output ONLY valid JSON."
@@ -135,13 +153,25 @@ class CouncilConfig:
 
 
 def _merge(table: dict[str, Any], section: str, target: Any) -> Any:
+    """Overlay a TOML table onto a dataclass instance.
+
+    Nested tables recurse into the corresponding nested dataclass; without this
+    a `[pipeline.prompts]` table would replace the PipelinePromptsConfig
+    instance with a bare dict and every attribute access on it would fail.
+    """
     overrides = table.get(section, {})
     if not overrides:
         return target
     kwargs = {}
     for f in target.__dataclass_fields__:
-        if f in overrides:
-            kwargs[f] = overrides[f]
+        if f not in overrides:
+            continue
+        current = getattr(target, f)
+        value = overrides[f]
+        if is_dataclass(current) and isinstance(value, dict):
+            kwargs[f] = _merge(overrides, f, current)
+        else:
+            kwargs[f] = value
     return type(target)(**kwargs)
 
 
@@ -157,15 +187,7 @@ def load_env() -> EnvConfig:
         cors=_merge(raw, "cors", cfg.cors),
         opencode=_merge(raw, "opencode", cfg.opencode),
         bridge=_merge(raw, "bridge", cfg.bridge),
-        pipeline=_merge(
-            raw, "pipeline",
-            PipelineConfig(
-                prompts=_merge(
-                    raw.get("pipeline", {}), "prompts",
-                    cfg.pipeline.prompts,
-                ),
-            ),
-        ),
+        pipeline=_merge(raw, "pipeline", cfg.pipeline),
         storage=_merge(raw, "storage", cfg.storage),
         debug=_merge(raw, "debug", cfg.debug),
     )
