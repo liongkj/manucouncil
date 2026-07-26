@@ -1,6 +1,8 @@
-import { useMemo, useState } from 'react'
-import type { MemberResult, Critique, ChairResult } from './types'
+import { useEffect, useMemo, useRef } from 'react'
+import type { MemberResult, Critique, ChairResult, MemberStatus, SpriteState, PhaseKey } from './types'
+import { COUNCIL_PHASES, DEBATE_PHASES } from './types'
 import AgentSprite from './AgentSprite'
+import PhaseStepper from './PhaseStepper'
 import { cleanResponse, excerpt } from './utils'
 
 interface Props {
@@ -10,20 +12,36 @@ interface Props {
   inProgress?: boolean
   mode?: 'council' | 'debate'
   currentRound?: number
+  currentPhase?: PhaseKey | null
 }
 
-const ROLE_ORDER = ['Scientific Editor', 'Skeptical Referee', 'Argument Editor', 'Language Editor', 'Scientific Verifier']
-
-function memberIndex(m: MemberResult): number {
-  const idx = ROLE_ORDER.indexOf(m.role)
-  return idx >= 0 ? idx : 99
+/** Live-streamed reasoning text captured per member while status was 'thinking', so it survives into the collapsed "show thinking" disclosure once the member finishes. */
+function useReasoningTraces(members: MemberResult[]): Record<string, string> {
+  const traces = useRef<Record<string, string>>({})
+  useEffect(() => {
+    for (const m of members) {
+      if (m.status === 'thinking' && m.analysis) {
+        traces.current[m.member_id] = m.analysis
+      }
+    }
+  }, [members])
+  return traces.current
 }
 
-export default function CouncilDiscussion({ members, critiques, chair, inProgress, mode = 'council', currentRound }: Props) {
-  const sorted = useMemo(() => [...members].sort((a, b) => memberIndex(a) - memberIndex(b)), [members])
+function spriteStateFor(status: MemberStatus | undefined): SpriteState {
+  switch (status) {
+    case 'queued': return 'queued'
+    case 'thinking': return 'thinking'
+    case 'error': return 'error'
+    default: return 'done'
+  }
+}
+
+export default function CouncilDiscussion({ members, critiques, chair, inProgress, mode = 'council', currentRound, currentPhase }: Props) {
   const critiqueList = critiques || []
   const hasChair = !!chair
   const allDone = !inProgress
+  const reasoningTraces = useReasoningTraces(members)
 
   const isDebate = mode === 'debate'
   const roundLabels: Record<number, string> = {
@@ -34,9 +52,19 @@ export default function CouncilDiscussion({ members, critiques, chair, inProgres
     5: 'Chair Synthesis',
   }
 
+  const phaseStepper = inProgress && (
+    <PhaseStepper
+      phases={isDebate ? DEBATE_PHASES : COUNCIL_PHASES}
+      current={currentPhase ?? null}
+      round={currentRound}
+    />
+  )
+
   if (isDebate && currentRound) {
     return (
       <div className="space-y-5">
+        {phaseStepper}
+
         <div className="flex items-center gap-2 text-[10px] font-medium text-gray-400 uppercase tracking-wider mb-2">
           <span>Council Discussion</span>
           <span className="px-2 py-0.5 bg-council-100 text-council-700 rounded">
@@ -45,20 +73,20 @@ export default function CouncilDiscussion({ members, critiques, chair, inProgres
         </div>
 
         <DebateRoundView
-          members={sorted}
+          members={members}
           critiques={critiqueList}
           chair={chair}
           currentRound={currentRound}
           inProgress={inProgress === true}
           allDone={allDone}
-          totalMembers={members.length}
+          reasoningTraces={reasoningTraces}
         />
 
         {hasChair && chair && currentRound >= 5 && (
           <div className="animate-fade-in-up border-t border-gray-100 pt-4 mt-4" style={{ animationDelay: '200ms' }}>
             <div className="flex items-start gap-3">
               <div className="flex flex-col items-center gap-1 pt-1 w-12 shrink-0">
-                <AgentSprite role="Chair" animated={!allDone} />
+                <AgentSprite role="Chair" state="done" />
                 <span className="text-[9px] font-semibold text-council-700 leading-tight text-center">Chair</span>
               </div>
               <div className="flex-1 min-w-0">
@@ -73,26 +101,27 @@ export default function CouncilDiscussion({ members, critiques, chair, inProgres
 
   return (
     <div className="space-y-5">
+      {phaseStepper}
+
       <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">
         Council Discussion
       </div>
 
       <div className="space-y-4">
-        {sorted.map((m, i) => {
+        {members.map((m, i) => {
           const c = critiqueList.find(cr => cr.reviewer_id === m.member_id)
           return (
             <div key={m.member_id} className="animate-fade-in-up" style={{ animationDelay: `${i * 100}ms` }}>
               <div className="flex items-start gap-3">
                 <div className="flex flex-col items-center gap-1 pt-1 w-12 shrink-0">
-                  <AgentSprite role={m.role} animated={inProgress && i === sorted.length - 1} />
+                  <AgentSprite role={m.role} state={spriteStateFor(m.status)} />
                   <span className="text-[9px] font-medium text-gray-500 leading-tight text-center">{m.role}</span>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <ChatBubble
-                    text={m.analysis}
-                    role={m.role}
-                    newArrival={inProgress && i === sorted.length - 1}
-                    round={m.round}
+                  <MemberBubble
+                    member={m}
+                    reasoningTrace={reasoningTraces[m.member_id]}
+                    newArrival={inProgress && i === members.length - 1}
                   />
                   {c && (
                     <div className="mt-2 ml-2">
@@ -104,17 +133,13 @@ export default function CouncilDiscussion({ members, critiques, chair, inProgres
             </div>
           )
         })}
-
-        {inProgress && members.length < Math.max(sorted.length + 1, 2) && (
-          <ThinkingMember role="Reviewer" />
-        )}
       </div>
 
       {hasChair && chair && (
         <div className="animate-fade-in-up border-t border-gray-100 pt-4 mt-4" style={{ animationDelay: '200ms' }}>
           <div className="flex items-start gap-3">
             <div className="flex flex-col items-center gap-1 pt-1 w-12 shrink-0">
-              <AgentSprite role="Chair" animated={!allDone} />
+              <AgentSprite role="Chair" state="done" />
               <span className="text-[9px] font-semibold text-council-700 leading-tight text-center">Chair</span>
             </div>
             <div className="flex-1 min-w-0">
@@ -128,7 +153,7 @@ export default function CouncilDiscussion({ members, critiques, chair, inProgres
         <div className="border-t border-gray-100 pt-4 mt-4">
           <div className="flex items-start gap-3 opacity-60">
             <div className="flex flex-col items-center gap-1 pt-1 w-12 shrink-0">
-              <AgentSprite role="Chair" animated />
+              <AgentSprite role="Chair" state="thinking" />
               <span className="text-[9px] font-semibold text-council-700 leading-tight text-center">Chair</span>
             </div>
             <div className="flex-1 min-w-0">
@@ -143,14 +168,14 @@ export default function CouncilDiscussion({ members, critiques, chair, inProgres
   )
 }
 
-function DebateRoundView({ members, critiques, chair, currentRound, inProgress = false, allDone, totalMembers }: {
+function DebateRoundView({ members, critiques, chair, currentRound, inProgress = false, allDone, reasoningTraces }: {
   members: MemberResult[]
   critiques: Critique[]
   chair: ChairResult | null
   currentRound: number
   inProgress: boolean
   allDone: boolean
-  totalMembers: number
+  reasoningTraces: Record<string, string>
 }) {
   const roundMembers = members.filter(m => m.round === currentRound || (currentRound === 1 && !m.round))
   const roundCritiques = critiques.filter(c => c.round === currentRound)
@@ -162,25 +187,21 @@ function DebateRoundView({ members, critiques, chair, currentRound, inProgress =
           <div key={m.member_id} className="animate-fade-in-up" style={{ animationDelay: `${i * 100}ms` }}>
             <div className="flex items-start gap-3">
               <div className="flex flex-col items-center gap-1 pt-1 w-12 shrink-0">
-                <AgentSprite role={m.role} animated={inProgress && i === roundMembers.length - 1} />
+                <AgentSprite role={m.role} state={spriteStateFor(m.status)} />
                 <span className="text-[9px] font-medium text-gray-500 leading-tight text-center">
                   {m.role} {m.round && <span className="text-council-500 ml-1">R{m.round}</span>}
                 </span>
               </div>
               <div className="flex-1 min-w-0">
-                <ChatBubble
-                  text={m.analysis}
-                  risks={m.risks}
-                  confidence={m.confidence}
-                  role={m.role}
+                <MemberBubble
+                  member={m}
+                  reasoningTrace={reasoningTraces[m.member_id]}
                   newArrival={inProgress && i === roundMembers.length - 1}
-                  round={m.round}
                 />
               </div>
             </div>
           </div>
         ))}
-        {inProgress && roundMembers.length < totalMembers && <ThinkingMember role="Reviewer" />}
       </div>
     )
   }
@@ -194,7 +215,7 @@ function DebateRoundView({ members, critiques, chair, currentRound, inProgress =
             <div key={c.reviewer_id} className="animate-fade-in-up" style={{ animationDelay: `${i * 100}ms` }}>
               <div className="flex items-start gap-3">
                 <div className="flex flex-col items-center gap-1 pt-1 w-12 shrink-0">
-                  <AgentSprite role={reviewer?.role || 'Reviewer'} animated={inProgress && i === roundCritiques.length - 1} />
+                  <AgentSprite role={reviewer?.role || 'Reviewer'} state={inProgress && i === roundCritiques.length - 1 ? 'thinking' : 'done'} />
                   <span className="text-[9px] font-medium text-gray-500 leading-tight text-center">
                     {reviewer?.role} (critique)
                   </span>
@@ -206,7 +227,6 @@ function DebateRoundView({ members, critiques, chair, currentRound, inProgress =
             </div>
           )
         })}
-        {inProgress && roundCritiques.length < totalMembers && <ThinkingMember role="Reviewer" />}
       </div>
     )
   }
@@ -216,7 +236,7 @@ function DebateRoundView({ members, critiques, chair, currentRound, inProgress =
       <div className="border-t border-gray-100 pt-4 mt-4">
         <div className="flex items-start gap-3">
           <div className="flex flex-col items-center gap-1 pt-1 w-12 shrink-0">
-            <AgentSprite role="Chair" animated={inProgress} />
+            <AgentSprite role="Chair" state={inProgress ? 'thinking' : 'done'} />
             <span className="text-[9px] font-semibold text-council-700 leading-tight text-center">Chair</span>
           </div>
           <div className="flex-1 min-w-0">
@@ -236,16 +256,67 @@ function DebateRoundView({ members, critiques, chair, currentRound, inProgress =
   return null
 }
 
-function ChatBubble({ text, risks, confidence, role, newArrival, round }: {
-  text: string
-  role: string
-  risks?: string[]
-  confidence?: number
+/** Per-member bubble, presentation driven entirely by member.status. Undefined status (historical replay) is treated as 'done'. */
+function MemberBubble({ member, reasoningTrace, newArrival }: {
+  member: MemberResult
+  reasoningTrace?: string
   newArrival?: boolean
-  round?: number
 }) {
-  const clean = useMemo(() => cleanResponse(text), [text])
+  const status = member.status ?? 'done'
+
+  if (status === 'queued') return <QueuedRow />
+  if (status === 'error') return <ErrorRow error={member.error} />
+  if (status === 'thinking') return <ThinkingRail text={member.analysis} round={member.round} />
+  return <DoneBubble member={member} reasoningTrace={reasoningTrace} newArrival={newArrival} />
+}
+
+function QueuedRow() {
+  return (
+    <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50/60 px-3 py-2.5 text-[11px] text-gray-400 italic">
+      Waiting to review...
+    </div>
+  )
+}
+
+function ErrorRow({ error }: { error?: string }) {
+  return (
+    <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-[11px] text-red-700">
+      <span className="font-semibold">Error: </span>{error || 'This member failed to respond.'}
+    </div>
+  )
+}
+
+/** Collapsed thinking rail: shows the tail of live reasoning text so it reads as progress, not a frozen head. No confidence/risk badges — those don't exist until the member is done. */
+function ThinkingRail({ text, round }: { text: string; round?: number }) {
+  const tail = text.length > 180 ? text.slice(-180) : text
+
+  return (
+    <div className="rounded-xl border border-gray-100 bg-gray-50/70 overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-1 text-[9px] font-medium text-gray-400 uppercase tracking-wider border-b border-gray-100">
+        <span>⋯ thinking</span>
+        {round && <span className="text-council-400 normal-case tracking-normal">Round {round}</span>}
+      </div>
+      <div className="pl-2.5 pr-3 py-2 border-l-2 border-gray-300 ml-2.5 my-1.5">
+        <div className="font-mono text-[10px] text-gray-400 leading-relaxed whitespace-pre-wrap break-words">
+          {tail.length < text.length && <span className="text-gray-300">...</span>}
+          {tail}
+          <span className="inline-block w-1.5 h-3 bg-gray-400 ml-0.5 align-text-bottom animate-pulse" />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DoneBubble({ member, reasoningTrace, newArrival }: {
+  member: MemberResult
+  reasoningTrace?: string
+  newArrival?: boolean
+}) {
+  const clean = useMemo(() => cleanResponse(member.analysis), [member.analysis])
   const preview = useMemo(() => excerpt(clean), [clean])
+  const role = member.role
+  const risks = member.risks || []
+  const confidence = member.confidence ?? 0
 
   const borderColor = role.includes('Scientific') ? 'border-blue-200' :
     role.includes('Skeptical') ? 'border-amber-200' :
@@ -263,32 +334,30 @@ function ChatBubble({ text, risks, confidence, role, newArrival, round }: {
     <div className={`rounded-xl border ${borderColor} ${bgColor} shadow-sm overflow-hidden
       ${newArrival ? 'ring-2 ring-council-300' : ''}`}>
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-inherit bg-white/60">
-        {newArrival && (
-          <span className="flex gap-0.5">
-            <span className="w-1 h-2 bg-council-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-            <span className="w-1 h-2 bg-council-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-            <span className="w-1 h-2 bg-council-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-          </span>
-        )}
-        {round && (
+        {member.round && (
           <span className="text-[9px] font-bold bg-council-500 text-white rounded px-1.5 py-0.5 mr-auto">
-            Round {round}
+            Round {member.round}
           </span>
         )}
         <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
-          (confidence ?? 0) >= 0.7 ? 'bg-green-100 text-green-700' :
-          (confidence ?? 0) >= 0.4 ? 'bg-yellow-100 text-yellow-700' :
+          confidence >= 0.7 ? 'bg-green-100 text-green-700' :
+          confidence >= 0.4 ? 'bg-yellow-100 text-yellow-700' :
           'bg-red-100 text-red-700'
         }`}>
-          {Math.round((confidence ?? 0) * 100)}% confident
+          {Math.round(confidence * 100)}% confident
         </span>
-        {(risks?.length ?? 0) > 0 && (
+        {risks.length > 0 && (
           <span className="text-[10px] bg-red-50 text-red-600 rounded px-1.5 py-0.5">
-            {risks!.length} risk{risks!.length > 1 ? 's' : ''}
+            {risks.length} risk{risks.length > 1 ? 's' : ''}
           </span>
         )}
       </div>
       <div className="px-3 py-2 text-xs text-gray-700 space-y-1">
+        {member.recommendation && (
+          <div className="text-[10px] text-council-700 bg-council-50 border border-council-100 rounded px-2 py-1">
+            <span className="font-semibold">Recommendation: </span>{member.recommendation}
+          </div>
+        )}
         <div className="leading-relaxed whitespace-pre-wrap line-clamp-3">{preview}</div>
         <details className="text-[10px]">
           <summary className="cursor-pointer text-gray-500 hover:text-gray-700 font-medium">Full analysis</summary>
@@ -296,6 +365,14 @@ function ChatBubble({ text, risks, confidence, role, newArrival, round }: {
             {clean}
           </div>
         </details>
+        {reasoningTrace && (
+          <details className="text-[10px]">
+            <summary className="cursor-pointer text-gray-400 hover:text-gray-600 font-medium">show thinking</summary>
+            <div className="mt-1 pt-1 border-t border-gray-100 max-h-64 overflow-y-auto whitespace-pre-wrap leading-relaxed font-mono text-gray-400">
+              {reasoningTrace}
+            </div>
+          </details>
+        )}
       </div>
     </div>
   )
@@ -414,28 +491,6 @@ function ChairBubble({ chair }: { chair: ChairResult }) {
             {chair.rationale}
           </div>
         </details>
-      </div>
-    </div>
-  )
-}
-
-function ThinkingMember({ role }: { role: string }) {
-  return (
-    <div className="animate-fade-in-up opacity-60">
-      <div className="flex items-start gap-3">
-        <div className="flex flex-col items-center gap-1 pt-1 w-12 shrink-0">
-          <AgentSprite role={role} animated />
-          <span className="text-[9px] font-medium text-gray-400 leading-tight text-center">{role}</span>
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3">
-            <div className="flex gap-1">
-              <span className="w-1.5 h-3 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: '0ms', animationDuration: '0.6s' }} />
-              <span className="w-1.5 h-3 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: '150ms', animationDuration: '0.6s' }} />
-              <span className="w-1.5 h-3 bg-gray-300 rounded-full animate-bounce" style={{ animationDelay: '300ms', animationDuration: '0.6s' }} />
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   )

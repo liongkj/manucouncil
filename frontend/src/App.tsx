@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { Message, ModelRef, PresetConfig, CouncilResponse, AvailableModels, ModelOption, StageEvent } from './types'
+import type { Message, ModelRef, PresetConfig, CouncilResponse, AvailableModels, ModelOption, StageEvent, MemberResult } from './types'
 import { DEFAULT_SETTINGS, type Settings } from './types'
 import Chat from './Chat'
 import SettingsPanel from './Settings'
@@ -80,20 +80,39 @@ export default function App() {
   }, [sessionId])
 
   const handleEvent = useCallback((ev: string, d: any, presetId: string, presetLabel?: string) => {
-    if (ev === 'member_text') {
+    if (ev === 'roster') {
+      setCouncilProgress(prev => prev ? {
+        ...prev,
+        roster: d,
+        members: (d.members || []).map((rm: any): MemberResult => ({
+          member_id: rm.member_id,
+          role: rm.role,
+          model: rm.model,
+          analysis: '',
+          recommendation: null,
+          risks: [],
+          confidence: 0,
+          status: 'queued',
+        })),
+      } : prev)
+    } else if (ev === 'member_text' || ev === 'member_revision_text') {
       setCouncilProgress(prev => {
         if (!prev) return prev
         const existing = prev.members.find(m => m.member_id === d.member_id)
         if (existing) {
           return {
             ...prev,
+            active_member_id: d.member_id,
             members: prev.members.map(m =>
-              m.member_id === d.member_id ? { ...m, analysis: d.text, round: d.round } : m
+              m.member_id === d.member_id
+                ? { ...m, role: d.role || m.role, analysis: d.text, round: d.round, status: 'thinking' }
+                : m
             ),
           }
         }
         return {
           ...prev,
+          active_member_id: d.member_id,
           members: [...prev.members, {
             member_id: d.member_id,
             role: d.role || '',
@@ -103,24 +122,34 @@ export default function App() {
             risks: [],
             confidence: 0.5,
             round: d.round,
+            status: 'thinking',
           }],
         }
       })
-      } else if (ev === 'member_done') {
-      setCouncilProgress(prev => prev ? {
-        ...prev,
-        members: [...prev.members.filter(m => m.member_id !== d.member_id), {
+    } else if (ev === 'member_done' || ev === 'member_revision') {
+      setCouncilProgress(prev => {
+        if (!prev) return prev
+        const existing = prev.members.find(m => m.member_id === d.member_id)
+        const updated: MemberResult = {
           member_id: d.member_id,
           role: d.role,
           model: d.model,
           analysis: d.analysis,
-          recommendation: null,
+          recommendation: d.recommendation ?? null,
           risks: d.risks || [],
-          confidence: d.confidence || 0.5,
+          confidence: d.confidence ?? 0.5,
           round: d.round,
-        }],
-      } : prev)
-    } else if (ev === 'member_revision_text') {
+          status: 'done',
+        }
+        if (existing) {
+          return {
+            ...prev,
+            members: prev.members.map(m => m.member_id === d.member_id ? updated : m),
+          }
+        }
+        return { ...prev, members: [...prev.members, updated] }
+      })
+    } else if (ev === 'member_error') {
       setCouncilProgress(prev => {
         if (!prev) return prev
         const existing = prev.members.find(m => m.member_id === d.member_id)
@@ -128,7 +157,7 @@ export default function App() {
           return {
             ...prev,
             members: prev.members.map(m =>
-              m.member_id === d.member_id ? { ...m, analysis: d.text, round: d.round } : m
+              m.member_id === d.member_id ? { ...m, status: 'error', error: d.error } : m
             ),
           }
         }
@@ -138,43 +167,41 @@ export default function App() {
             member_id: d.member_id,
             role: d.role || '',
             model: { provider: '', model: '' },
-            analysis: d.text,
+            analysis: '',
             recommendation: null,
             risks: [],
-            confidence: 0.5,
+            confidence: 0,
             round: d.round,
+            status: 'error',
+            error: d.error,
           }],
         }
       })
-    } else if (ev === 'member_revision') {
-      setCouncilProgress(prev => prev ? {
-        ...prev,
-        members: [...prev.members.filter(m => m.member_id !== d.member_id), {
-          member_id: d.member_id,
-          role: d.role,
-          model: d.model,
-          analysis: d.analysis,
-          recommendation: null,
-          risks: d.risks || [],
-          confidence: d.confidence || 0.5,
-          round: d.round,
-        }],
-      } : prev)
     } else if (ev === 'critique_done') {
       setCouncilProgress(prev => prev ? {
         ...prev,
         critiques: [...(prev.critiques || []), {
           reviewer_id: d.reviewer_id,
-          rankings: [] as string[],
-          strongest_points: {} as Record<string, string[]>,
-          weaknesses: {} as Record<string, string[]>,
+          rankings: d.rankings || [],
+          strongest_points: d.strongest_points || {},
+          weaknesses: d.weaknesses || {},
           disagreements: d.disagreements || [],
+          label_map: d.label_map || {},
           round: d.round,
+        }],
+      } : prev)
+    } else if (ev === 'critique_error') {
+      setCouncilProgress(prev => prev ? {
+        ...prev,
+        critique_errors: [...(prev.critique_errors || []), {
+          reviewer_id: d.reviewer_id,
+          error: d.error,
         }],
       } : prev)
     } else if (ev === 'chair_done') {
       setCouncilProgress(prev => prev ? {
         ...prev,
+        chair_status: 'done',
         chair: {
           verdict: d.verdict || '',
           consensus: d.consensus || [],
@@ -184,8 +211,17 @@ export default function App() {
           rationale: d.rationale || '',
         },
       } : prev)
+    } else if (ev === 'chair_error') {
+      setCouncilProgress(prev => prev ? {
+        ...prev,
+        chair_status: 'error',
+        chair_error: typeof d === 'string' ? d : JSON.stringify(d),
+      } : prev)
     } else if (ev === 'stage') {
       setCurrentStage(d)
+      if ((d.stage === 'chair' && d.status === 'starting') || d.status === 'chair_starting') {
+        setCouncilProgress(prev => prev ? { ...prev, chair_status: 'thinking' } : prev)
+      }
     } else if (ev === 'done') {
       setCouncilProgress(prev => {
         if (prev) {
@@ -222,7 +258,7 @@ export default function App() {
       body.contract_overrides = contractOverrides
     }
 
-    setCouncilProgress({ preset_id: presetId, text, chair: null, members: [], critiques: [] })
+    setCouncilProgress({ preset_id: presetId, text, chair: null, members: [], critiques: [], roster: null, chair_status: 'idle', chair_error: null, critique_errors: [] })
     setCurrentStage({ stage: councilMode === 'debate' ? 'debate' : 'members', status: 'starting', round: 1, total: councilMode === 'debate' ? 4 : 0 })
 
     const res = await fetch('/api/council/stream', {
